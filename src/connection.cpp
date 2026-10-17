@@ -186,6 +186,26 @@ void Connection::send_notification(std::string method, Json params) {
     transport_->send(Notification{std::move(method), std::move(params)});
 }
 
+void Connection::cancel(const RequestId& request_id) {
+    transport_->cancel_request(request_id);
+    if (const auto* numeric_id = std::get_if<std::int64_t>(&request_id)) {
+        std::shared_ptr<std::promise<Json>> promise;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = pending_requests_.find(*numeric_id);
+            if (it != pending_requests_.end()) {
+                promise = std::move(it->second);
+                pending_requests_.erase(it);
+                deadlines_.erase(*numeric_id);
+            }
+        }
+        if (promise) {
+            promise->set_exception(std::make_exception_ptr(std::runtime_error("request cancelled")));
+        }
+        timer_cv_.notify_all();
+    }
+}
+
 void Connection::handle_message(const Message& message) {
     std::visit(
         [this](const auto& value) {

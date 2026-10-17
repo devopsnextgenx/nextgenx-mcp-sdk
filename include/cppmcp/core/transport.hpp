@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -28,12 +29,27 @@ enum class CloseReason {
     shutdown,
 };
 
+enum class CancellationStrategy {
+    notification,
+    abort_stream,
+};
+
 class ITransport {
 public:
     virtual ~ITransport() = default;
     virtual void start() = 0;
     virtual void send(const Message&) = 0;
     virtual void close() = 0;
+    virtual CancellationStrategy cancellation_strategy() const noexcept {
+        return CancellationStrategy::notification;
+    }
+    virtual void cancel_request(const RequestId& request_id) {
+        if (cancellation_strategy() != CancellationStrategy::notification) {
+            throw std::logic_error("abort-stream transports must implement cancel_request");
+        }
+        const auto id = std::visit([](const auto& value) -> Json { return value; }, request_id);
+        send(Notification{"notifications/cancelled", {{"requestId", id}}});
+    }
 
     void on_message(std::function<void(Message)> callback) { on_message_ = std::move(callback); }
     void on_parse_error(std::function<void(RpcError)> callback) { on_parse_error_ = std::move(callback); }
@@ -119,10 +135,11 @@ public:
     void start() override {}
     void send(const Message& message) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (peer_ == nullptr) {
+        auto peer = peer_.lock();
+        if (!peer) {
             return;
         }
-        peer_->deliver(message);
+        peer->deliver(message);
     }
 
     void close() override {
@@ -132,7 +149,7 @@ public:
         }
     }
 
-    void connect(std::shared_ptr<MemoryTransport> peer) { peer_ = std::move(peer); }
+    void connect(const std::shared_ptr<MemoryTransport>& peer) { peer_ = peer; }
     void deliver(const Message& message) {
         if (on_message_) {
             on_message_(message);
@@ -142,7 +159,7 @@ public:
     bool closed() const { return closed_; }
 
 private:
-    std::shared_ptr<MemoryTransport> peer_;
+    std::weak_ptr<MemoryTransport> peer_;
     std::mutex mutex_;
     bool closed_ = false;
 };

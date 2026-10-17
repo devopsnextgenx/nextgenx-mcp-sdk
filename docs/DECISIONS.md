@@ -34,3 +34,24 @@
   compatibility. Any feature retained by the live protocol will follow its
   current schema and wire pattern rather than being forced onto the legacy
   pattern.
+
+## HTTP handler foundation
+
+- The first HTTP slice is a socket-free `McpHttpHandler` linked as
+  `cppmcp::transport_http`. An embedding HTTP stack supplies each exchange;
+  network I/O, HTTP parsing, TLS, connection limits, and timeout enforcement
+  belong to a later adapter and are not implied by this target.
+- This handler implements the 2026-07-28 request shape only. Legacy session
+  behavior is kept separate because the current revision removed both GET
+  streams and protocol sessions.
+- `automatic` response mode returns JSON unless only SSE is acceptable;
+  `json_only` and `sse_only` enforce their corresponding Accept type. The
+  current server dispatch is synchronous, so this slice streams only a final
+  response, not progress or logging notifications.
+- The `ITransport` cancellation default sends `notifications/cancelled`.
+  Transports that close an individual response stream override the strategy
+  and `cancel_request`; closing an entire client transport is not an acceptable
+  substitute for per-request cancellation.
+- The current `Server` tool API does not expose `x-mcp-header` declarations.
+  Tool-parameter header mirroring is deferred until schema validation and
+  client tool-schema caching are implemented together.

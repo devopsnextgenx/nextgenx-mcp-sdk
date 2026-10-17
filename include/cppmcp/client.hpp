@@ -32,6 +32,7 @@ public:
 
     void connect(std::shared_ptr<cppmcp::core::ITransport> transport);
     void close();
+    void cancel(const cppmcp::core::RequestId& request_id);
 
     nlohmann::json discover();
     nlohmann::json list_tools();

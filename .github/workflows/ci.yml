@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  foundation:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCPPMCP_BUILD_TESTS=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  sanitizers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: address-undefined
+            flags: -fsanitize=address,undefined -fno-omit-frame-pointer
+          - name: thread
+            flags: -fsanitize=thread -fno-omit-frame-pointer
+    name: Sanitizers (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build/sanitizer
+          -DCPPMCP_BUILD_SHARED=OFF
+          -DCPPMCP_BUILD_STATIC=ON
+          -DCPPMCP_BUILD_TESTS=ON
+          "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}"
+          "-DCMAKE_EXE_LINKER_FLAGS=${{ matrix.flags }}"
+      - name: Build
+        run: cmake --build build/sanitizer --parallel
+      - name: Test
+        run: ctest --test-dir build/sanitizer --output-on-failure

@@ -126,3 +126,47 @@ features beyond the core message and version primitives.
 
 The schema snapshot is the official `schema/2026-07-28/schema.json`; its SHA-256
 is `e8c8ae56f7dd8eab465fb2740db54042761c4f9e0e19b23b98504cec27f4c91d`.
+
+## Streamable HTTP review
+
+The HTTP handler work re-read the versioned transport and lifecycle material:
+
+- [2026-07-28 Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http)
+- [2025-11-25 transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+- [2025-03-26 transports](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
+- [2025-11-25 lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)
+- [2026-07-28 versioning and compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+
+The current revision differs materially from the legacy transport:
+
+- Modern Streamable HTTP is POST-only and has no session ID, GET event
+  endpoint, DELETE termination, `Last-Event-ID`, or stream replay. Legacy
+  2025-03-26 through 2025-11-25 retains those session and resumption rules.
+- Current requests require `MCP-Protocol-Version` to match
+  `_meta["io.modelcontextprotocol/protocolVersion"]`, and require `Mcp-Method`.
+  `Mcp-Name` mirrors `params.name` for `tools/call` and `prompts/get`, and
+  `params.uri` for `resources/read`. Request `_meta` also requires an object
+  at `io.modelcontextprotocol/clientCapabilities`. Header names are
+  case-insensitive.
+- `Mcp-Name` and annotated `Mcp-Param-*` values use the case-sensitive
+  `=?base64?...?=` sentinel for values that are not safe plain ASCII, and for
+  plain values that themselves look like that sentinel.
+- Missing, malformed, or mismatched mirrored headers use HTTP `400` with
+  JSON-RPC error `-32020` (`HeaderMismatch`); unsupported versions use HTTP
+  `400` with error `-32022` and `data.requested` / `data.supported`, as defined
+  by the current schema snapshot.
+- The current transport page describes `202 Accepted` for an accepted
+  notification POST, but also states that the 2026-07-28 core defines no
+  client-to-server notifications over Streamable HTTP. The implementation
+  rejects such notifications rather than silently accepting unimplemented
+  methods. JSON-RPC responses are not valid client POST bodies in this
+  revision.
+- Request-scoped SSE can carry related notifications followed by the final
+  response; `subscriptions/listen` is a distinct long-lived stream for opted-in
+  change notifications. Modern streams do not support event IDs or replay.
+
+The current implementation validates the modern request metadata and header
+mirrors, returns JSON or a final-response SSE event, and rejects unsupported
+methods. It does not yet implement the socket adapter, `subscriptions/listen`,
+tool parameter header annotations, legacy sessions, or the HTTP client; those
+behaviors must not be inferred from the in-process handler.

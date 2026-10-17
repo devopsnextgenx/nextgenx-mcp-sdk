@@ -19,6 +19,13 @@ void Client::close() {
     }
 }
 
+void Client::cancel(const cppmcp::core::RequestId& request_id) {
+    if (!connection_) {
+        throw std::runtime_error("client is not connected");
+    }
+    connection_->cancel(request_id);
+}
+
 nlohmann::json Client::discover() {
     if (!connection_) {
         throw std::runtime_error("client is not connected");

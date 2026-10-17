@@ -45,6 +45,10 @@ set(CPPMCP_TRANSPORT_STDIO_SOURCES
     src/stdio.cpp
 )
 
+set(CPPMCP_TRANSPORT_HTTP_SOURCES
+    src/http_handler.cpp
+)
+
 function(cppmcp_configure_library target)
     target_compile_features(${target} PUBLIC cxx_std_20)
     target_include_directories(${target}
@@ -87,6 +91,12 @@ if(CPPMCP_BUILD_STATIC)
     cppmcp_configure_library(cppmcp_transport_stdio)
     set_target_properties(cppmcp_transport_stdio PROPERTIES EXPORT_NAME transport_stdio)
     target_link_libraries(cppmcp_transport_stdio PUBLIC cppmcp_core)
+
+    add_library(cppmcp_transport_http STATIC ${CPPMCP_TRANSPORT_HTTP_SOURCES})
+    add_library(cppmcp::transport_http ALIAS cppmcp_transport_http)
+    cppmcp_configure_library(cppmcp_transport_http)
+    set_target_properties(cppmcp_transport_http PROPERTIES EXPORT_NAME transport_http)
+    target_link_libraries(cppmcp_transport_http PUBLIC cppmcp_server cppmcp_core)
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -107,7 +117,7 @@ install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/nlohmann
 
 set(CPPMCP_INSTALL_TARGETS)
 if(CPPMCP_BUILD_STATIC)
-    list(APPEND CPPMCP_INSTALL_TARGETS cppmcp_core cppmcp_server cppmcp_client cppmcp_transport_stdio)
+    list(APPEND CPPMCP_INSTALL_TARGETS cppmcp_core cppmcp_server cppmcp_client cppmcp_transport_stdio cppmcp_transport_http)
 endif()
 if(CPPMCP_BUILD_SHARED)
     list(APPEND CPPMCP_INSTALL_TARGETS cppmcp_core_shared)
@@ -160,9 +170,11 @@ if(CPPMCP_BUILD_TESTS)
         tests/version_test.cpp
         tests/schema_contract_test.cpp
         tests/phase2_test.cpp
+        tests/http_handler_test.cpp
+        tests/cancellation_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
-        target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio)
+        target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio cppmcp::transport_http)
     else()
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core_shared)
     endif()

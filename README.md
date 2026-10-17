@@ -1,8 +1,9 @@
 # cppmcp
 
-cppmcp is an original C++20 SDK foundation for MCP. It is being built in
-reviewable phases; this initial phase provides the JSON-RPC core and version
-negotiation, not a complete MCP client or server.
+cppmcp is an original C++20 SDK for MCP, developed in reviewable phases. It
+provides the JSON-RPC core, version negotiation, server/client dispatch, stdio
+transport, and an in-process Streamable HTTP request handler. The HTTP handler
+is transport-independent; a socket server and HTTP client are not included yet.
 
 ## Requirements
 
@@ -59,3 +60,21 @@ helpers.
 
 See [SPEC_NOTES.md](docs/SPEC_NOTES.md) for the sources reviewed and
 [DECISIONS.md](docs/DECISIONS.md) for assumptions and deferred choices.
+
+## In-process Streamable HTTP handler
+
+Link `cppmcp::transport_http` to use the socket-free modern HTTP handler with
+an exchange supplied by your HTTP stack:
+
+```cpp
+#include <cppmcp/transport/http.hpp>
+
+cppmcp::Server server;
+cppmcp::transport::McpHttpHandler handler(server);
+```
+
+The handler validates modern request headers, body metadata, accepted response
+types, and origins before dispatching to the existing `Server`. It can produce
+a JSON response or a request-scoped SSE response. This is not a network server:
+Asio/llhttp adapters, `subscriptions/listen`, legacy HTTP sessions, and an HTTP
+client remain unimplemented.

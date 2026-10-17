@@ -10,6 +10,8 @@ void test_versions();
 void test_schema_contract();
 void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
+void test_http_handler();
+void test_cancellation_strategy();
 
 namespace {
 
@@ -41,6 +43,8 @@ int main() {
     run("test_schema_contract", test_schema_contract);
     run("test_phase2_memory_roundtrip", test_phase2_memory_roundtrip);
     run("test_phase2_stdio_roundtrip", test_phase2_stdio_roundtrip);
+    run("test_http_handler", test_http_handler);
+    run("test_cancellation_strategy", test_cancellation_strategy);
 
     if (cppmcp::test::failures != 0) {
         CPPMCP_LOG_ERROR(cppmcp::test::failures << " check(s) failed");

@@ -40,6 +40,7 @@ public:
     std::future<Json> send_request(std::string method, Json params = Json::object(),
                                   std::chrono::milliseconds timeout = std::chrono::milliseconds{5000});
     void send_notification(std::string method, Json params = Json::object());
+    void cancel(const RequestId& request_id);
 
     std::int64_t next_request_id();
 
