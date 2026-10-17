@@ -30,6 +30,19 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(CPPMCP_SOURCES
     src/json_rpc.cpp
     src/version.cpp
+    src/connection.cpp
+)
+
+set(CPPMCP_SERVER_SOURCES
+    src/server.cpp
+)
+
+set(CPPMCP_CLIENT_SOURCES
+    src/client.cpp
+)
+
+set(CPPMCP_TRANSPORT_STDIO_SOURCES
+    src/stdio.cpp
 )
 
 function(cppmcp_configure_library target)
@@ -56,6 +69,24 @@ if(CPPMCP_BUILD_STATIC)
     add_library(cppmcp::core ALIAS cppmcp_core)
     cppmcp_configure_library(cppmcp_core)
     set_target_properties(cppmcp_core PROPERTIES EXPORT_NAME core)
+
+    add_library(cppmcp_server STATIC ${CPPMCP_SERVER_SOURCES})
+    add_library(cppmcp::server ALIAS cppmcp_server)
+    cppmcp_configure_library(cppmcp_server)
+    set_target_properties(cppmcp_server PROPERTIES EXPORT_NAME server)
+    target_link_libraries(cppmcp_server PUBLIC cppmcp_core)
+
+    add_library(cppmcp_client STATIC ${CPPMCP_CLIENT_SOURCES})
+    add_library(cppmcp::client ALIAS cppmcp_client)
+    cppmcp_configure_library(cppmcp_client)
+    set_target_properties(cppmcp_client PROPERTIES EXPORT_NAME client)
+    target_link_libraries(cppmcp_client PUBLIC cppmcp_core cppmcp_server)
+
+    add_library(cppmcp_transport_stdio STATIC ${CPPMCP_TRANSPORT_STDIO_SOURCES})
+    add_library(cppmcp::transport_stdio ALIAS cppmcp_transport_stdio)
+    cppmcp_configure_library(cppmcp_transport_stdio)
+    set_target_properties(cppmcp_transport_stdio PROPERTIES EXPORT_NAME transport_stdio)
+    target_link_libraries(cppmcp_transport_stdio PUBLIC cppmcp_core)
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -76,7 +107,7 @@ install(DIRECTORY ${nlohmann_json_SOURCE_DIR}/include/nlohmann
 
 set(CPPMCP_INSTALL_TARGETS)
 if(CPPMCP_BUILD_STATIC)
-    list(APPEND CPPMCP_INSTALL_TARGETS cppmcp_core)
+    list(APPEND CPPMCP_INSTALL_TARGETS cppmcp_core cppmcp_server cppmcp_client cppmcp_transport_stdio)
 endif()
 if(CPPMCP_BUILD_SHARED)
     list(APPEND CPPMCP_INSTALL_TARGETS cppmcp_core_shared)
@@ -111,6 +142,16 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cppmcp
 )
 
+add_executable(cppmcp_stdio_server examples/stdio_server.cpp)
+target_link_libraries(cppmcp_stdio_server PRIVATE cppmcp::server cppmcp::transport_stdio)
+
+target_compile_features(cppmcp_stdio_server PRIVATE cxx_std_20)
+
+add_executable(cppmcp_stdio_client examples/stdio_client.cpp)
+target_link_libraries(cppmcp_stdio_client PRIVATE cppmcp::client cppmcp::transport_stdio)
+
+target_compile_features(cppmcp_stdio_client PRIVATE cxx_std_20)
+
 if(CPPMCP_BUILD_TESTS)
     enable_testing()
     add_executable(cppmcp_core_tests
@@ -118,9 +159,10 @@ if(CPPMCP_BUILD_TESTS)
         tests/json_rpc_test.cpp
         tests/version_test.cpp
         tests/schema_contract_test.cpp
+        tests/phase2_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
-        target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core)
+        target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio)
     else()
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core_shared)
     endif()

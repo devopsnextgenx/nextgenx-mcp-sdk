@@ -52,9 +52,9 @@ std::vector<ToolDefinition> Server::tools() const {
 }
 
 nlohmann::json Server::discover() const {
-    return {{"protocolVersions", {"2026-07-28", "2025-11-25"}},
-            {"capabilities", {"tools", {"listChanged", false}}},
-            {"serverInfo", {"name", info_.name}, {"title", info_.title}, {"version", info_.version}}};
+    return {{"protocolVersions", nlohmann::json::array({"2026-07-28", "2025-11-25"})},
+            {"capabilities", {{"tools", {{"listChanged", false}}}}},
+            {"serverInfo", {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
 }
 
 std::string Server::request_protocol_version(const core::Json& params) const {
@@ -74,10 +74,10 @@ core::Message Server::handle_notification(const core::Notification& notification
     if (notification.method == "notifications/initialized") {
         return core::Notification{"notifications/initialized", {}};
     }
-    return core::ErrorResponse{std::nullopt,
-                              core::protocol_error(core::ErrorCode::method_not_found,
-                                                   "Notification method not implemented");
-    };
+    return core::ErrorResponse{
+        std::nullopt,
+        core::protocol_error(core::ErrorCode::method_not_found,
+                             "Notification method not implemented")};
 }
 
 core::Message Server::handle_request(const core::Request& request) {
@@ -92,10 +92,9 @@ core::Message Server::handle_request(const core::Request& request) {
         return core::ResultResponse{request.id,
                                     {{"protocolVersion", "2025-11-25"},
                                      {"capabilities", {{"tools", {{"listChanged", false}}}}},
-                                     {"serverInfo",
-                                      {{"name", info_.name},
-                                       {"title", info_.title},
-                                       {"version", info_.version}}}}};
+                                     {"serverInfo", {{"name", info_.name},
+                                                     {"title", info_.title},
+                                                     {"version", info_.version}}}}};
     }
 
     if (method == "ping") {
@@ -118,14 +117,15 @@ core::Message Server::handle_request(const core::Request& request) {
     }
 
     if (method == "tools/call") {
-        const auto name = request.params.value("name", "");
+        const auto name = request.params.value("name", std::string{});
         if (name.empty()) {
             return core::ErrorResponse{request.id,
                                       core::protocol_error(core::ErrorCode::invalid_params,
                                                            "A tool name is required")};
         }
+        const std::string tool_name = name;
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = tools_.find(name.get<std::string>());
+        auto it = tools_.find(tool_name);
         if (it == tools_.end()) {
             return core::ErrorResponse{request.id,
                                       core::protocol_error(core::ErrorCode::method_not_found,
@@ -133,7 +133,9 @@ core::Message Server::handle_request(const core::Request& request) {
         }
         const auto result = it->second.handler(request.params.value("arguments", nlohmann::json::object()),
                                               request.params);
-        nlohmann::json payload = {{"content", nlohmann::json::array({{ {"type", "text"}, {"text", result.dump()} }})}};
+        nlohmann::json content = nlohmann::json::array();
+        content.push_back({{"type", "text"}, {"text", result.dump()}});
+        nlohmann::json payload = {{"content", std::move(content)}};
         if (!result.is_object() || !result.contains("isError")) {
             payload["structuredContent"] = result;
         }

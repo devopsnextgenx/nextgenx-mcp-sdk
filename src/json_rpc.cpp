@@ -67,10 +67,7 @@ RpcError protocol_error(ErrorCode code, std::string message, std::optional<Json>
 
 ParseOutcome parse_message(std::string_view input, bool allow_batch) noexcept {
     try {
-        const Json value = Json::parse(input,
-                                      nullptr,
-                                      false,
-                                      nlohmann::json::error_handler_t::strict);
+        const Json value = Json::parse(std::string(input));
         if (value.is_array()) {
             if (allow_batch) {
                 return invalid_request("Batch JSON-RPC requests are currently disabled.");

@@ -3,10 +3,12 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <condition_variable>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <queue>
 #include <string>
 #include <thread>
 #include <utility>
@@ -145,7 +147,7 @@ private:
     bool closed_ = false;
 };
 
-std::pair<std::shared_ptr<MemoryTransport>, std::shared_ptr<MemoryTransport>>
+inline std::pair<std::shared_ptr<MemoryTransport>, std::shared_ptr<MemoryTransport>>
 make_memory_transport_pair() {
     auto a = std::make_shared<MemoryTransport>();
     auto b = std::make_shared<MemoryTransport>();

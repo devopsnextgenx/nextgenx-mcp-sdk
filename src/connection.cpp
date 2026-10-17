@@ -1,5 +1,7 @@
 #include "cppmcp/core/connection.hpp"
 
+#include <stdexcept>
+#include <thread>
 #include <utility>
 
 namespace cppmcp::core {
