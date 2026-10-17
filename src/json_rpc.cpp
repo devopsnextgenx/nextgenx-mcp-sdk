@@ -65,9 +65,18 @@ RpcError protocol_error(ErrorCode code, std::string message, std::optional<Json>
     return RpcError{static_cast<std::int32_t>(code), std::move(message), std::move(data)};
 }
 
-ParseOutcome parse_message(std::string_view input) noexcept {
+ParseOutcome parse_message(std::string_view input, bool allow_batch) noexcept {
     try {
-        const Json value = Json::parse(input);
+        const Json value = Json::parse(input,
+                                      nullptr,
+                                      false,
+                                      nlohmann::json::error_handler_t::strict);
+        if (value.is_array()) {
+            if (allow_batch) {
+                return invalid_request("Batch JSON-RPC requests are currently disabled.");
+            }
+            return invalid_request("Batch JSON-RPC requests are not supported.");
+        }
         if (!value.is_object()) {
             return invalid_request("A JSON-RPC message must be a JSON object.");
         }
@@ -178,7 +187,7 @@ Json to_json(const Message& message) {
 }
 
 std::string serialize_message(const Message& message) {
-    return to_json(message).dump();
+    return to_json(message).dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 }
 
 Json error_response(const RpcError& error, std::optional<RequestId> id) {

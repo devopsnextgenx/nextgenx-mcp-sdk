@@ -54,7 +54,8 @@ struct ErrorResponse {
 using Message = std::variant<Request, Notification, ResultResponse, ErrorResponse>;
 using ParseOutcome = std::variant<Message, RpcError>;
 
-[[nodiscard]] ParseOutcome parse_message(std::string_view input) noexcept;
+[[nodiscard]] ParseOutcome parse_message(std::string_view input,
+                                         bool allow_batch = false) noexcept;
 [[nodiscard]] Json to_json(const Message& message);
 [[nodiscard]] std::string serialize_message(const Message& message);
 [[nodiscard]] Json error_response(const RpcError& error,

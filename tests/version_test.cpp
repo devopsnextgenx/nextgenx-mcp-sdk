@@ -32,4 +32,16 @@ void test_versions() {
     CPPMCP_CHECK(mismatch.code == -32022);
     CPPMCP_CHECK(mismatch.data->at("requested") == "1900-01-01");
     CPPMCP_CHECK(mismatch.data->at("supported").size() == 2);
+
+    const auto negotiated = negotiate_version(" 2026-07-28 ",
+                                             {"2025-11-25", "2026-07-28"});
+    CPPMCP_CHECK(negotiated.selected.has_value());
+    CPPMCP_CHECK(negotiated.selected->value == "2026-07-28");
+    CPPMCP_CHECK(negotiated.requested == "2026-07-28");
+
+    const auto duplicate_common = highest_common_version(
+        {"2026-07-28", "2026-07-28", "2025-11-25"},
+        {" 2025-11-25 ", "2026-07-28"});
+    CPPMCP_CHECK(duplicate_common.has_value());
+    CPPMCP_CHECK(duplicate_common->value == "2026-07-28");
 }
