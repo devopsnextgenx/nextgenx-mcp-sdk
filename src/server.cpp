@@ -1,5 +1,9 @@
 #include "cppmcp/server.hpp"
 
+#include <exception>
+
+#include "cppmcp/core/log.hpp"
+
 namespace cppmcp {
 namespace {
 
@@ -18,10 +22,12 @@ core::Json tool_payload(const ToolDefinition& tool) {
     if (!tool.title.empty()) {
         item["title"] = tool.title;
     }
-    if (!tool.output_schema.is_null()) {
+    // output_schema and meta default to empty objects; an empty outputSchema would
+    // be read by clients as a declared schema, so only advertise them when set.
+    if (!tool.output_schema.empty()) {
         item["outputSchema"] = tool.output_schema;
     }
-    if (!tool.meta.is_null()) {
+    if (!tool.meta.empty()) {
         item["_meta"] = tool.meta;
     }
     return item;
@@ -33,6 +39,7 @@ Server::Server(ServerInfo info) : info_(std::move(info)) {}
 
 void Server::add_tool(ToolDefinition tool) {
     std::lock_guard<std::mutex> lock(mutex_);
+    CPPMCP_LOG_DEBUG("registering tool '" << tool.name << "'");
     tools_[tool.name] = std::move(tool);
 }
 
@@ -71,9 +78,11 @@ std::string Server::request_method_name(const core::Request& request) const {
 }
 
 core::Message Server::handle_notification(const core::Notification& notification) {
+    CPPMCP_LOG_DEBUG("notification method=" << notification.method);
     if (notification.method == "notifications/initialized") {
         return core::Notification{"notifications/initialized", {}};
     }
+    CPPMCP_LOG_WARN("unhandled notification method=" << notification.method);
     return core::ErrorResponse{
         std::nullopt,
         core::protocol_error(core::ErrorCode::method_not_found,
@@ -83,6 +92,7 @@ core::Message Server::handle_notification(const core::Notification& notification
 core::Message Server::handle_request(const core::Request& request) {
     const auto method = request.method;
     const auto version = request_protocol_version(request.params);
+    CPPMCP_LOG_DEBUG("request method=" << method << " protocolVersion='" << version << "'");
 
     if (method == "server/discover") {
         return core::ResultResponse{request.id, discover()};
@@ -119,32 +129,67 @@ core::Message Server::handle_request(const core::Request& request) {
     if (method == "tools/call") {
         const auto name = request.params.value("name", std::string{});
         if (name.empty()) {
+            CPPMCP_LOG_WARN("tools/call without a tool name");
             return core::ErrorResponse{request.id,
                                       core::protocol_error(core::ErrorCode::invalid_params,
                                                            "A tool name is required")};
         }
-        const std::string tool_name = name;
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = tools_.find(tool_name);
-        if (it == tools_.end()) {
+
+        // Copy the handler out so the server mutex is not held while user code runs
+        // (a handler that calls add_tool(), or a slow one, must not block the server).
+        decltype(ToolDefinition::handler) handler;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = tools_.find(name);
+            if (it != tools_.end()) {
+                found = true;
+                handler = it->second.handler;
+            }
+        }
+        if (!found) {
+            CPPMCP_LOG_WARN("tools/call for unknown tool '" << name << "'");
             return core::ErrorResponse{request.id,
                                       core::protocol_error(core::ErrorCode::method_not_found,
                                                            "Unknown tool")};
         }
-        const auto result = it->second.handler(request.params.value("arguments", nlohmann::json::object()),
-                                              request.params);
+
+        auto finalize = [&](nlohmann::json payload) -> core::Message {
+            if (!version.empty()) {
+                payload["resultType"] = "complete";
+                payload["_meta"] = {{"io.modelcontextprotocol/serverInfo",
+                                     {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
+            }
+            return core::ResultResponse{request.id, std::move(payload)};
+        };
+
+        CPPMCP_LOG_DEBUG("calling tool '" << name << "'");
+        nlohmann::json result;
+        try {
+            result = handler(request.params.value("arguments", nlohmann::json::object()),
+                             request.params);
+        } catch (const std::exception& error) {
+            CPPMCP_LOG_ERROR("tool '" << name << "' threw: " << error.what());
+            nlohmann::json content = nlohmann::json::array();
+            content.push_back({{"type", "text"},
+                               {"text", std::string("Tool execution failed: ") + error.what()}});
+            return finalize({{"content", std::move(content)}, {"isError", true}});
+        }
+
         nlohmann::json content = nlohmann::json::array();
         content.push_back({{"type", "text"}, {"text", result.dump()}});
         nlohmann::json payload = {{"content", std::move(content)}};
-        if (!result.is_object() || !result.contains("isError")) {
-            payload["structuredContent"] = result;
+        if (result.is_object()) {
+            if (!result.contains("isError")) {
+                payload["structuredContent"] = result;
+            }
+        } else {
+            // structuredContent must be a JSON object, so wrap scalars/arrays/null.
+            nlohmann::json wrapped = nlohmann::json::object();
+            wrapped["result"] = result;
+            payload["structuredContent"] = std::move(wrapped);
         }
-        if (!version.empty()) {
-            payload["resultType"] = "complete";
-            payload["_meta"] = {{"io.modelcontextprotocol/serverInfo",
-                                 {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
-        }
-        return core::ResultResponse{request.id, std::move(payload)};
+        return finalize(std::move(payload));
     }
 
     if (method == "notifications/cancelled") {
@@ -153,6 +198,7 @@ core::Message Server::handle_request(const core::Request& request) {
                                                        "Cancellation notification requires a live request context")};
     }
 
+    CPPMCP_LOG_WARN("unknown method '" << method << "'");
     return core::ErrorResponse{request.id,
                               core::protocol_error(core::ErrorCode::method_not_found,
                                                    "Unknown method")};

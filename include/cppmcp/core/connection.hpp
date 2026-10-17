@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
 #include <future>
 #include <map>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 #include "cppmcp/core/json_rpc.hpp"
@@ -18,8 +20,14 @@ namespace cppmcp::core {
 
 class Connection {
 public:
+    // `executor` is kept for API compatibility but is no longer used for
+    // request timeouts (those run on a dedicated cancellable timer thread).
     explicit Connection(std::shared_ptr<ITransport> transport,
                        std::shared_ptr<IExecutor> executor = std::make_shared<ThreadPoolExecutor>(2));
+    ~Connection();
+
+    Connection(const Connection&) = delete;
+    Connection& operator=(const Connection&) = delete;
 
     void set_request_handler(std::function<void(const Request&)> handler);
     void set_notification_handler(std::function<void(const Notification&)> handler);
@@ -37,6 +45,8 @@ public:
 
 private:
     void handle_message(const Message& message);
+    void timer_loop();
+    void fail_all_pending_locked(const std::string& reason);
 
     std::shared_ptr<ITransport> transport_;
     std::shared_ptr<IExecutor> executor_;
@@ -45,9 +55,14 @@ private:
     std::function<void(const ResultResponse&)> result_handler_;
     std::function<void(const ErrorResponse&)> error_handler_;
 
-    std::mutex mutex_;
+    std::mutex mutex_;  // guards everything below
     std::atomic<std::int64_t> next_id_{1};
     std::unordered_map<std::int64_t, std::shared_ptr<std::promise<Json>>> pending_requests_;
+    std::map<std::int64_t, std::chrono::steady_clock::time_point> deadlines_;
+    bool closed_ = false;
+
+    std::condition_variable timer_cv_;
+    std::thread timer_thread_;
 };
 
 }  // namespace cppmcp::core

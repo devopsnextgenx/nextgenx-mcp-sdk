@@ -1,0 +1,56 @@
+2026-10-17T23:03:55.739Z INFO  pid=4111507 tid=1 test_main.cpp:18 {anonymous}::run() - running test_json_rpc
+2026-10-17T23:03:55.739Z INFO  pid=4111507 tid=1 test_main.cpp:26 {anonymous}::run() - test_json_rpc passed in 0 ms
+2026-10-17T23:03:55.739Z INFO  pid=4111507 tid=1 test_main.cpp:18 {anonymous}::run() - running test_versions
+2026-10-17T23:03:55.739Z INFO  pid=4111507 tid=1 test_main.cpp:26 {anonymous}::run() - test_versions passed in 0 ms
+2026-10-17T23:03:55.739Z INFO  pid=4111507 tid=1 test_main.cpp:18 {anonymous}::run() - running test_schema_contract
+2026-10-17T23:03:55.753Z INFO  pid=4111507 tid=1 test_main.cpp:26 {anonymous}::run() - test_schema_contract passed in 13 ms
+2026-10-17T23:03:55.753Z INFO  pid=4111507 tid=1 test_main.cpp:18 {anonymous}::run() - running test_phase2_memory_roundtrip
+2026-10-17T23:03:55.753Z DEBUG pid=4111507 tid=1 server.cpp:42 Server::add_tool() - registering tool 'echo'
+2026-10-17T23:03:55.753Z DEBUG pid=4111507 tid=1 connection.cpp:173 Connection::send_request() - request id=1 method=server/discover timeout=5000ms
+2026-10-17T23:03:55.753Z DEBUG pid=4111507 tid=1 server.cpp:95 Server::handle_request() - request method=server/discover protocolVersion='2026-07-28'
+2026-10-17T23:03:55.753Z DEBUG pid=4111507 tid=1 connection.cpp:173 Connection::send_request() - request id=2 method=tools/list timeout=5000ms
+2026-10-17T23:03:55.753Z DEBUG pid=4111507 tid=1 server.cpp:95 Server::handle_request() - request method=tools/list protocolVersion='2026-07-28'
+2026-10-17T23:03:55.753Z DEBUG pid=4111507 tid=1 connection.cpp:173 Connection::send_request() - request id=3 method=tools/call timeout=5000ms
+2026-10-17T23:03:55.754Z DEBUG pid=4111507 tid=1 server.cpp:95 Server::handle_request() - request method=tools/call protocolVersion='2026-07-28'
+2026-10-17T23:03:55.754Z DEBUG pid=4111507 tid=1 server.cpp:166 Server::handle_request() - calling tool 'echo'
+2026-10-17T23:03:55.754Z INFO  pid=4111507 tid=1 connection.cpp:46 Connection::Connection() - transport closed (reason=normal)
+2026-10-17T23:03:55.754Z INFO  pid=4111507 tid=1 connection.cpp:46 Connection::Connection() - transport closed (reason=normal)
+2026-10-17T23:03:55.754Z INFO  pid=4111507 tid=1 test_main.cpp:26 {anonymous}::run() - test_phase2_memory_roundtrip passed in 0 ms
+2026-10-17T23:03:55.754Z INFO  pid=4111507 tid=1 test_main.cpp:18 {anonymous}::run() - running test_phase2_stdio_roundtrip
+2026-10-17T23:03:55.754Z INFO  pid=4111507 tid=1 stdio.cpp:351 StdioClientTransport::start() - spawned child pid=4111517 command=./cppmcp_stdio_server args=0 cwd=.
+2026-10-17T23:03:55.754Z DEBUG pid=4111507 tid=1 connection.cpp:173 Connection::send_request() - request id=1 method=server/discover timeout=5000ms
+2026-10-17T23:03:55.755Z DEBUG pid=4111507 tid=1 stdio.cpp:409 StdioClientTransport::send() - send frame (295 bytes): {"id":1,"jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":[null],"io.modelcontextprotocol/clientInfo":{"name":"phase2-stdio-client","title":"phase2 stdio client","version":"0.1.0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}
+2026-10-17T23:03:55.756Z INFO  pid=4111517 tid=1 stdio_server.cpp:30 main() - starting cppmcp-stdio-server
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=1 server.cpp:42 Server::add_tool() - registering tool 'echo'
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=1 server.cpp:42 Server::add_tool() - registering tool 'add'
+2026-10-17T23:03:55.756Z INFO  pid=4111517 tid=1 stdio.cpp:127 StdioServerTransport::start() - server transport started; max_line_length=16777216 stdout_guard=off
+2026-10-17T23:03:55.756Z INFO  pid=4111517 tid=1 stdio_server.cpp:76 main() - ready; serving 2 tool(s) over stdio
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=2 stdio.cpp:146 StdioServerTransport::handle_line() - recv frame (295 bytes): {"id":1,"jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":[null],"io.modelcontextprotocol/clientInfo":{"name":"phase2-stdio-client","title":"phase2 stdio client","version":"0.1.0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=2 server.cpp:95 Server::handle_request() - request method=server/discover protocolVersion='2026-07-28'
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=2 stdio.cpp:210 StdioServerTransport::send() - send frame (214 bytes): {"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{"listChanged":false}},"protocolVersions":["2026-07-28","2025-11-25"],"serverInfo":{"name":"cppmcp-stdio-server","title":"stdio server","version":"0.1.0"}}}
+2026-10-17T23:03:55.756Z DEBUG pid=4111507 tid=2 stdio.cpp:378 StdioClientTransport::read_loop() - recv frame (214 bytes): {"id":1,"jsonrpc":"2.0","result":{"capabilities":{"tools":{"listChanged":false}},"protocolVersions":["2026-07-28","2025-11-25"],"serverInfo":{"name":"cppmcp-stdio-server","title":"stdio server","version":"0.1.0"}}}
+2026-10-17T23:03:55.756Z DEBUG pid=4111507 tid=1 connection.cpp:173 Connection::send_request() - request id=2 method=tools/list timeout=5000ms
+2026-10-17T23:03:55.756Z DEBUG pid=4111507 tid=1 stdio.cpp:409 StdioClientTransport::send() - send frame (290 bytes): {"id":2,"jsonrpc":"2.0","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":[null],"io.modelcontextprotocol/clientInfo":{"name":"phase2-stdio-client","title":"phase2 stdio client","version":"0.1.0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=2 stdio.cpp:146 StdioServerTransport::handle_line() - recv frame (290 bytes): {"id":2,"jsonrpc":"2.0","method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":[null],"io.modelcontextprotocol/clientInfo":{"name":"phase2-stdio-client","title":"phase2 stdio client","version":"0.1.0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}
+2026-10-17T23:03:55.756Z DEBUG pid=4111517 tid=2 server.cpp:95 Server::handle_request() - request method=tools/list protocolVersion='2026-07-28'
+2026-10-17T23:03:55.757Z DEBUG pid=4111517 tid=2 stdio.cpp:210 StdioServerTransport::send() - send frame (519 bytes): {"id":2,"jsonrpc":"2.0","result":{"cacheScope":"private","resultType":"complete","tools":[{"annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false},"description":"Add two numbers.","inputSchema":{"type":"object"},"name":"add","title":"Add"},{"annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false},"description":"Echo a value back to the client.","inputSchema":{"type":"object"},"name":"echo","title":"Echo"}],"ttlMs":1000}}
+2026-10-17T23:03:55.757Z DEBUG pid=4111507 tid=2 stdio.cpp:378 StdioClientTransport::read_loop() - recv frame (519 bytes): {"id":2,"jsonrpc":"2.0","result":{"cacheScope":"private","resultType":"complete","tools":[{"annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false},"description":"Add two numbers.","inputSchema":{"type":"object"},"name":"add","title":"Add"},{"annotations":{"destructiveHint":true,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":false},"description":"Echo a value back to the client.","inputSchema":{"type":"object"},"name":"echo","title":"Echo"}],"ttlMs":1000}}
+2026-10-17T23:03:55.757Z DEBUG pid=4111507 tid=1 connection.cpp:173 Connection::send_request() - request id=3 method=tools/call timeout=5000ms
+2026-10-17T23:03:55.757Z DEBUG pid=4111507 tid=1 stdio.cpp:409 StdioClientTransport::send() - send frame (334 bytes): {"id":3,"jsonrpc":"2.0","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":[null],"io.modelcontextprotocol/clientInfo":{"name":"phase2-stdio-client","title":"phase2 stdio client","version":"0.1.0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"arguments":{"value":"stdio"},"name":"echo"}}
+2026-10-17T23:03:55.757Z DEBUG pid=4111517 tid=2 stdio.cpp:146 StdioServerTransport::handle_line() - recv frame (334 bytes): {"id":3,"jsonrpc":"2.0","method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":[null],"io.modelcontextprotocol/clientInfo":{"name":"phase2-stdio-client","title":"phase2 stdio client","version":"0.1.0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"},"arguments":{"value":"stdio"},"name":"echo"}}
+2026-10-17T23:03:55.757Z DEBUG pid=4111517 tid=2 server.cpp:95 Server::handle_request() - request method=tools/call protocolVersion='2026-07-28'
+2026-10-17T23:03:55.757Z DEBUG pid=4111517 tid=2 server.cpp:166 Server::handle_request() - calling tool 'echo'
+2026-10-17T23:03:55.757Z DEBUG pid=4111517 tid=2 stdio.cpp:210 StdioServerTransport::send() - send frame (264 bytes): {"id":3,"jsonrpc":"2.0","result":{"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"cppmcp-stdio-server","title":"stdio server","version":"0.1.0"}},"content":[{"text":"\"stdio\"","type":"text"}],"resultType":"complete","structuredContent":{"result":"stdio"}}}
+2026-10-17T23:03:55.757Z DEBUG pid=4111507 tid=2 stdio.cpp:378 StdioClientTransport::read_loop() - recv frame (264 bytes): {"id":3,"jsonrpc":"2.0","result":{"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"cppmcp-stdio-server","title":"stdio server","version":"0.1.0"}},"content":[{"text":"\"stdio\"","type":"text"}],"resultType":"complete","structuredContent":{"result":"stdio"}}}
+2026-10-17T23:03:55.758Z INFO  pid=4111507 tid=1 stdio.cpp:441 StdioClientTransport::close() - closing: stdin closed; waiting up to 2000 ms for child pid=4111517 to exit on EOF
+2026-10-17T23:03:55.758Z INFO  pid=4111517 tid=2 stdio.cpp:198 StdioServerTransport::read_loop() - stdin reached EOF; was_running=yes; on_close handler set
+2026-10-17T23:03:55.758Z INFO  pid=4111517 tid=2 stdio_server.cpp:67 main() - transport closed (reason=eof); shutting down
+2026-10-17T23:03:55.758Z DEBUG pid=4111517 tid=1 stdio.cpp:230 StdioServerTransport::close() - close() called; was_running=no
+2026-10-17T23:03:55.758Z INFO  pid=4111517 tid=1 stdio_server.cpp:84 main() - bye
+2026-10-17T23:03:55.758Z DEBUG pid=4111517 tid=1 stdio.cpp:230 StdioServerTransport::close() - close() called; was_running=no
+2026-10-17T23:03:55.758Z DEBUG pid=4111507 tid=2 stdio.cpp:398 StdioClientTransport::read_loop() - child stdout reached EOF (running=no)
+2026-10-17T23:03:55.763Z INFO  pid=4111507 tid=1 stdio.cpp:444 StdioClientTransport::close() - child exited on its own after 5 ms: exit code 0
+2026-10-17T23:03:55.763Z INFO  pid=4111507 tid=1 connection.cpp:46 Connection::Connection() - transport closed (reason=normal)
+2026-10-17T23:03:55.763Z INFO  pid=4111507 tid=1 connection.cpp:46 Connection::Connection() - transport closed (reason=normal)
+2026-10-17T23:03:55.763Z INFO  pid=4111507 tid=1 test_main.cpp:26 {anonymous}::run() - test_phase2_stdio_roundtrip passed in 9 ms
+2026-10-17T23:03:55.763Z INFO  pid=4111507 tid=1 test_main.cpp:49 main() - All cppmcp foundation tests passed.

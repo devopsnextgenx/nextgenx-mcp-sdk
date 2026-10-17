@@ -1,12 +1,34 @@
-#include <chrono>
-#include <iostream>
+#include <condition_variable>
 #include <memory>
-#include <thread>
+#include <mutex>
 
+#include "cppmcp/core/log.hpp"
 #include "cppmcp/server.hpp"
 #include "cppmcp/transport/stdio.hpp"
 
+namespace {
+
+const char* reason_name(cppmcp::core::CloseReason reason) {
+    using cppmcp::core::CloseReason;
+    switch (reason) {
+        case CloseReason::normal: return "normal";
+        case CloseReason::eof: return "eof";
+        case CloseReason::parse_error: return "parse_error";
+        case CloseReason::timeout: return "timeout";
+        case CloseReason::error: return "error";
+        case CloseReason::child_exit: return "child_exit";
+        case CloseReason::shutdown: return "shutdown";
+    }
+    return "unknown";
+}
+
+}  // namespace
+
 int main() {
+    // Logs go to stderr (or CPPMCP_LOG_FILE); stdout is reserved for protocol frames.
+    cppmcp::core::log::configure(cppmcp::core::log::Level::info);
+    CPPMCP_LOG_INFO("starting cppmcp-stdio-server");
+
     cppmcp::Server server({"cppmcp-stdio-server", "stdio server", "0.1.0"});
     server.add_tool({
         .name = "echo",
@@ -36,8 +58,29 @@ int main() {
         }
     });
 
+    // Exit when the client goes away (stdin EOF). The callback runs on the
+    // transport's reader thread, so it only signals; main does the shutdown.
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    transport->on_close([&](cppmcp::core::CloseReason reason) {
+        CPPMCP_LOG_INFO("transport closed (reason=" << reason_name(reason) << "); shutting down");
+        {
+            std::lock_guard<std::mutex> lock(done_mutex);
+            done = true;
+        }
+        done_cv.notify_all();
+    });
+
     transport->start();
-    while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+    CPPMCP_LOG_INFO("ready; serving " << server.tools().size() << " tool(s) over stdio");
+
+    {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        done_cv.wait(lock, [&] { return done; });
     }
+
+    transport->close();  // main thread: safe to join the reader here
+    CPPMCP_LOG_INFO("bye");
+    return 0;
 }
