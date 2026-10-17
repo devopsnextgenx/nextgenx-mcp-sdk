@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
         const auto resultecho = client.call_tool("echo", {{"value", "hello"}});
         CPPMCP_LOG_INFO("tools/call echo result: " << resultecho.dump());
 
-        const auto resultadd = client.call_tool("add", {{"a", 5}, {"b", 7}});
+        const auto resultadd = client.call_tool("add", {{"a", 15}, {"b", 7}});
         CPPMCP_LOG_INFO("tools/call add result: " << resultadd.dump());
     } catch (const std::exception& error) {
         CPPMCP_LOG_ERROR("request failed: " << error.what());
