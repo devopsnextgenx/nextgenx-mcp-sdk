@@ -55,3 +55,16 @@
 - The current `Server` tool API does not expose `x-mcp-header` declarations.
   Tool-parameter header mirroring is deferred until schema validation and
   client tool-schema caching are implemented together.
+
+## Phase 3B HTTP server
+
+- The network adapter uses standalone Asio 1.30.2 and llhttp 9.2.1, each
+  fetched from a versioned archive with a fixed SHA-256. llhttp's C sources are
+  compiled into the HTTP transport so installed consumers do not need a
+  separately-installed parser library.
+- The listener uses one worker thread per accepted connection and runs the
+  existing `McpHttpHandler` for each parsed request. TLS, legacy sessions, and
+  client-side HTTP remain out of scope.
+- `Server::start_http` returns a stoppable RAII handle. `Server::run_http`
+  blocks until SIGINT or SIGTERM and then shuts down the listener and active
+  connections.

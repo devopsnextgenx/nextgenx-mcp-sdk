@@ -1,0 +1,504 @@
+#include "cppmcp/transport/http_server.hpp"
+
+#include "cppmcp/server.hpp"
+#include "cppmcp/transport/http.hpp"
+
+#include <asio.hpp>
+#include <llhttp.h>
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <exception>
+#include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include "cppmcp/core/log.hpp"
+
+namespace cppmcp::transport {
+namespace {
+
+using Tcp = asio::ip::tcp;
+
+struct ParseState {
+    HttpRequest request;
+    std::string field;
+    std::string value;
+    bool reading_value = false;
+    bool complete = false;
+};
+
+ParseState& parse_state(llhttp_t* parser) {
+    return *static_cast<ParseState*>(parser->data);
+}
+
+void finish_header(ParseState& state) {
+    if (!state.field.empty()) {
+        state.request.headers.emplace_back(std::move(state.field), std::move(state.value));
+    }
+    state.field.clear();
+    state.value.clear();
+    state.reading_value = false;
+}
+
+int on_url(llhttp_t* parser, const char* data, std::size_t length) {
+    parse_state(parser).request.target.append(data, length);
+    return 0;
+}
+
+int on_header_field(llhttp_t* parser, const char* data, std::size_t length) {
+    auto& state = parse_state(parser);
+    if (state.reading_value) {
+        finish_header(state);
+    }
+    state.field.append(data, length);
+    return 0;
+}
+
+int on_header_value(llhttp_t* parser, const char* data, std::size_t length) {
+    auto& state = parse_state(parser);
+    state.reading_value = true;
+    state.value.append(data, length);
+    return 0;
+}
+
+int on_headers_complete(llhttp_t* parser) {
+    auto& state = parse_state(parser);
+    finish_header(state);
+    state.request.method = llhttp_method_name(static_cast<llhttp_method_t>(parser->method));
+    return 0;
+}
+
+int on_body(llhttp_t* parser, const char* data, std::size_t length) {
+    parse_state(parser).request.body.append(data, length);
+    return 0;
+}
+
+int on_message_complete(llhttp_t* parser) {
+    parse_state(parser).complete = true;
+    llhttp_pause(parser);
+    return 0;
+}
+
+llhttp_settings_t parser_settings() {
+    llhttp_settings_t settings;
+    llhttp_settings_init(&settings);
+    settings.on_url = on_url;
+    settings.on_header_field = on_header_field;
+    settings.on_header_value = on_header_value;
+    settings.on_headers_complete = on_headers_complete;
+    settings.on_body = on_body;
+    settings.on_message_complete = on_message_complete;
+    return settings;
+}
+
+std::string reason_phrase(int status) {
+    switch (status) {
+        case 200: return "OK";
+        case 400: return "Bad Request";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 406: return "Not Acceptable";
+        case 413: return "Payload Too Large";
+        case 415: return "Unsupported Media Type";
+        case 500: return "Internal Server Error";
+        default: return "Error";
+    }
+}
+
+class SocketSseStream final : public SseStream {
+public:
+    explicit SocketSseStream(std::function<void(std::string)> write)
+        : write_(std::move(write)) {}
+
+    void write_event(std::string_view data) override {
+        std::string payload;
+        std::size_t offset = 0;
+        while (offset <= data.size()) {
+            const auto end = data.find('\n', offset);
+            payload += "data: ";
+            payload.append(data.substr(offset, end == std::string_view::npos
+                                                   ? data.size() - offset
+                                                   : end - offset));
+            payload += "\n";
+            if (end == std::string_view::npos) {
+                break;
+            }
+            offset = end + 1;
+        }
+        payload += "\n";
+        write_chunk(payload);
+    }
+
+    void close() override {
+        if (!closed_) {
+            write_("0\r\n\r\n");
+            closed_ = true;
+        }
+    }
+
+private:
+    void write_chunk(const std::string& payload) {
+        std::ostringstream size;
+        size << std::hex << payload.size() << "\r\n";
+        write_(size.str() + payload + "\r\n");
+    }
+
+    std::function<void(std::string)> write_;
+    bool closed_ = false;
+};
+
+class SocketExchange final : public IHttpExchange {
+public:
+    SocketExchange(std::shared_ptr<Tcp::socket> socket, HttpRequest request,
+                   bool keep_alive)
+        : socket_(std::move(socket)), request_(std::move(request)),
+          keep_alive_(keep_alive) {}
+
+    const HttpRequest& request() const override { return request_; }
+
+    void respond(int status, Headers headers, std::string body) override {
+        if (responded_) {
+            return;
+        }
+        responded_ = true;
+        headers.emplace_back("Content-Length", std::to_string(body.size()));
+        headers.emplace_back("Connection", keep_alive_ ? "keep-alive" : "close");
+        std::string response = "HTTP/1.1 " + std::to_string(status) + " " +
+                               reason_phrase(status) + "\r\n";
+        for (const auto& [name, value] : headers) {
+            response += name + ": " + value + "\r\n";
+        }
+        response += "\r\n";
+        response += body;
+        write(std::move(response));
+    }
+
+    SseStream& begin_sse(int status, Headers headers) override {
+        if (responded_) {
+            throw std::logic_error("HTTP exchange already has a response");
+        }
+        responded_ = true;
+        headers.emplace_back("Transfer-Encoding", "chunked");
+        headers.emplace_back("Connection", keep_alive_ ? "keep-alive" : "close");
+        std::string response = "HTTP/1.1 " + std::to_string(status) + " " +
+                               reason_phrase(status) + "\r\n";
+        for (const auto& [name, value] : headers) {
+            response += name + ": " + value + "\r\n";
+        }
+        response += "\r\n";
+        write(std::move(response));
+        stream_ = std::make_unique<SocketSseStream>(
+            [this](std::string bytes) { write(std::move(bytes)); });
+        return *stream_;
+    }
+
+    void on_disconnect(std::function<void()> callback) override {
+        disconnect_callback_ = std::move(callback);
+    }
+
+private:
+    void write(std::string bytes) {
+        asio::error_code error;
+        asio::write(*socket_, asio::buffer(bytes), error);
+        if (error && disconnect_callback_) {
+            disconnect_callback_();
+        }
+    }
+
+    std::shared_ptr<Tcp::socket> socket_;
+    HttpRequest request_;
+    bool keep_alive_;
+    bool responded_ = false;
+    std::function<void()> disconnect_callback_;
+    std::unique_ptr<SocketSseStream> stream_;
+};
+
+bool connection_wants_keep_alive(const ParseState& state, const llhttp_t& parser) {
+    if (parser.http_major > 1 || (parser.http_major == 1 && parser.http_minor >= 1)) {
+        for (const auto& [name, value] : state.request.headers) {
+            if (name == "Connection" || name == "connection") {
+                return value != "close";
+            }
+        }
+        return true;
+    }
+    for (const auto& [name, value] : state.request.headers) {
+        if ((name == "Connection" || name == "connection") && value == "keep-alive") {
+            return true;
+        }
+    }
+    return false;
+}
+
+void send_bad_request(const std::shared_ptr<Tcp::socket>& socket, int status) {
+    const auto response = "HTTP/1.1 " + std::to_string(status) + " " +
+                          reason_phrase(status) +
+                          "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    asio::error_code ignored;
+    asio::write(*socket, asio::buffer(response), ignored);
+    socket->shutdown(Tcp::socket::shutdown_both, ignored);
+    socket->close(ignored);
+}
+
+void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
+                      const McpHttpHandler& handler, const std::string& bearer_token) {
+    ParseState state;
+    asio::error_code endpoint_error;
+    const auto endpoint = socket->remote_endpoint(endpoint_error);
+    if (!endpoint_error) {
+        state.request.peer.remote_address = endpoint.address().to_string();
+    }
+
+    auto settings = parser_settings();
+    llhttp_t parser;
+    llhttp_init(&parser, HTTP_REQUEST, &settings);
+    parser.data = &state;
+    std::array<char, 8192> buffer{};
+    std::string pending;
+
+    while (socket->is_open()) {
+        if (pending.empty()) {
+            asio::error_code error;
+            const auto count = socket->read_some(asio::buffer(buffer), error);
+            if (error || count == 0) {
+                break;
+            }
+            pending.assign(buffer.data(), count);
+        }
+
+        state.complete = false;
+        const auto parsed = llhttp_execute(&parser, pending.data(), pending.size());
+        if (parsed != HPE_OK && parsed != HPE_PAUSED) {
+            send_bad_request(socket, 400);
+            break;
+        }
+        if (!state.complete) {
+            pending.clear();
+            continue;
+        }
+
+        const auto* consumed_position = llhttp_get_error_pos(&parser);
+        const auto consumed = consumed_position == nullptr
+                                  ? pending.size()
+                                  : static_cast<std::size_t>(consumed_position - pending.data());
+        std::string remainder = consumed <= pending.size()
+                                    ? pending.substr(consumed)
+                                    : std::string{};
+        const bool keep_alive = connection_wants_keep_alive(state, parser);
+        auto exchange = std::make_shared<SocketExchange>(socket, std::move(state.request),
+                                                          keep_alive);
+        try {
+            if (!bearer_token.empty()) {
+                std::vector<std::string_view> authorization;
+                for (const auto& [name, value] : exchange->request().headers) {
+                    std::string normalized = name;
+                    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                                   [](unsigned char ch) {
+                                       return static_cast<char>(std::tolower(ch));
+                                   });
+                    if (normalized == "authorization") {
+                        authorization.push_back(value);
+                    }
+                }
+                if (authorization.size() != 1 ||
+                    authorization.front() != "Bearer " + bearer_token) {
+                    exchange->respond(401, {{"WWW-Authenticate", "Bearer"}}, "");
+                } else {
+                    handler.handle(exchange);
+                }
+            } else {
+                handler.handle(exchange);
+            }
+        } catch (const std::exception& error) {
+            CPPMCP_LOG_ERROR("HTTP request handler failed: " << error.what());
+            if (!exchange->request().method.empty()) {
+                exchange->respond(500, {{"Content-Type", "text/plain"}}, "Internal Server Error");
+            }
+        }
+        if (!keep_alive || !socket->is_open()) {
+            break;
+        }
+
+        state = ParseState{};
+        if (!endpoint_error) {
+            state.request.peer.remote_address = endpoint.address().to_string();
+        }
+        llhttp_reset(&parser);
+        parser.data = &state;
+        pending = std::move(remainder);
+    }
+    asio::error_code ignored;
+    socket->shutdown(Tcp::socket::shutdown_both, ignored);
+    socket->close(ignored);
+}
+
+std::atomic<bool> signal_shutdown{false};
+
+void handle_signal(int) {
+    signal_shutdown.store(true, std::memory_order_relaxed);
+}
+
+}  // namespace
+
+struct AsioExecutor::Impl {
+    explicit Impl(std::size_t workers) : pool(workers == 0 ? 1 : workers) {}
+    asio::thread_pool pool;
+};
+
+AsioExecutor::AsioExecutor(std::size_t workers)
+    : impl_(std::make_unique<Impl>(workers)) {}
+
+AsioExecutor::~AsioExecutor() = default;
+
+void AsioExecutor::post(std::function<void()> task) {
+    if (task) {
+        asio::post(impl_->pool, std::move(task));
+    }
+}
+
+struct HttpServerHandle::Impl {
+    Impl(Server& server, const HttpOptions& options)
+        : handler(server, options.handler), acceptor(context),
+          bearer_token(options.bearer_token) {
+        const auto address = asio::ip::make_address(options.bind_address);
+        Tcp::endpoint endpoint(address, options.port);
+        acceptor.open(endpoint.protocol());
+        acceptor.set_option(Tcp::acceptor::reuse_address(true));
+        acceptor.bind(endpoint);
+        acceptor.listen();
+        acceptor.non_blocking(true);
+        bound_port = acceptor.local_endpoint().port();
+        accept_thread = std::thread([this] { accept_loop(); });
+    }
+
+    ~Impl() { stop(); }
+
+    void accept_loop() {
+        while (!stopping.load(std::memory_order_acquire)) {
+            auto socket = std::make_shared<Tcp::socket>(context);
+            asio::error_code error;
+            acceptor.accept(*socket, error);
+            if (!error) {
+                std::lock_guard<std::mutex> lock(workers_mutex);
+                if (stopping.load(std::memory_order_acquire)) {
+                    socket->close(error);
+                    break;
+                }
+                active_sockets.push_back(socket);
+                workers.emplace_back([this, socket] {
+                    serve_connection(socket, handler, bearer_token);
+                    std::lock_guard<std::mutex> worker_lock(workers_mutex);
+                    active_sockets.erase(
+                        std::remove(active_sockets.begin(), active_sockets.end(), socket),
+                        active_sockets.end());
+                });
+            } else if (error == asio::error::would_block ||
+                       error == asio::error::try_again) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            } else if (!stopping.load(std::memory_order_acquire)) {
+                CPPMCP_LOG_ERROR("HTTP accept failed: " << error.message());
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+    }
+
+    void stop() {
+        if (stopping.exchange(true, std::memory_order_acq_rel)) {
+            return;
+        }
+        asio::error_code ignored;
+        acceptor.close(ignored);
+        {
+            std::lock_guard<std::mutex> lock(workers_mutex);
+            for (const auto& socket : active_sockets) {
+                socket->shutdown(Tcp::socket::shutdown_both, ignored);
+                socket->close(ignored);
+            }
+        }
+        if (accept_thread.joinable()) {
+            accept_thread.join();
+        }
+        for (auto& worker : workers) {
+            if (worker.joinable()) {
+                worker.join();
+            }
+        }
+        workers.clear();
+        active_sockets.clear();
+    }
+
+    asio::io_context context;
+    McpHttpHandler handler;
+    Tcp::acceptor acceptor;
+    std::string bearer_token;
+    std::atomic<bool> stopping{false};
+    std::thread accept_thread;
+    std::mutex workers_mutex;
+    std::vector<std::thread> workers;
+    std::vector<std::shared_ptr<Tcp::socket>> active_sockets;
+    unsigned short bound_port = 0;
+};
+
+HttpServerHandle::HttpServerHandle(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {}
+
+HttpServerHandle::~HttpServerHandle() = default;
+
+HttpServerHandle::HttpServerHandle(HttpServerHandle&&) noexcept = default;
+
+HttpServerHandle& HttpServerHandle::operator=(HttpServerHandle&&) noexcept = default;
+
+void HttpServerHandle::stop() {
+    if (impl_) {
+        impl_->stop();
+    }
+}
+
+void HttpServerHandle::wait() {
+    if (!impl_) {
+        return;
+    }
+    while (!impl_->stopping.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+}
+
+unsigned short HttpServerHandle::port() const noexcept {
+    return impl_ ? impl_->bound_port : 0;
+}
+
+}  // namespace cppmcp::transport
+
+namespace cppmcp {
+
+std::unique_ptr<transport::HttpServerHandle> Server::start_http(
+    const transport::HttpOptions& options) {
+    auto impl = std::make_unique<transport::HttpServerHandle::Impl>(*this, options);
+    return std::unique_ptr<transport::HttpServerHandle>(new transport::HttpServerHandle(
+        std::move(impl)));
+}
+
+void Server::run_http(const transport::HttpOptions& options) {
+    transport::signal_shutdown.store(false, std::memory_order_relaxed);
+    const auto previous_int = std::signal(SIGINT, transport::handle_signal);
+    const auto previous_term = std::signal(SIGTERM, transport::handle_signal);
+    auto handle = start_http(options);
+    CPPMCP_LOG_INFO("HTTP server listening on " << options.bind_address << ":"
+                                                 << handle->port());
+    while (!transport::signal_shutdown.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    handle->stop();
+    std::signal(SIGINT, previous_int);
+    std::signal(SIGTERM, previous_term);
+}
+
+}  // namespace cppmcp

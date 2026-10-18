@@ -2,16 +2,17 @@
 
 cppmcp is an original C++20 SDK for MCP, developed in reviewable phases. It
 provides the JSON-RPC core, version negotiation, server/client dispatch, stdio
-transport, and an in-process Streamable HTTP request handler. The HTTP handler
-is transport-independent; a socket server and HTTP client are not included yet.
+transport, an in-process Streamable HTTP request handler, and an Asio/llhttp
+HTTP server.
 
 ## Requirements
 
 - CMake 3.24 or newer
 - GCC 12+, Clang 15+, or MSVC 2022
 - C++20-capable standard library
-- Network access on the first configure to fetch the pinned nlohmann/json 3.12.0
-  dependency (or an existing CMake FetchContent cache for offline builds)
+- Network access on the first configure to fetch the pinned nlohmann/json,
+  Asio, and llhttp dependencies (or an existing CMake FetchContent cache for
+  offline builds)
 
 ## Build, test, and package
 
@@ -61,20 +62,26 @@ helpers.
 See [SPEC_NOTES.md](docs/SPEC_NOTES.md) for the sources reviewed and
 [DECISIONS.md](docs/DECISIONS.md) for assumptions and deferred choices.
 
-## In-process Streamable HTTP handler
+## Streamable HTTP server
 
-Link `cppmcp::transport_http` to use the socket-free modern HTTP handler with
-an exchange supplied by your HTTP stack:
+Link `cppmcp::transport_http` to use the modern HTTP server:
 
 ```cpp
-#include <cppmcp/transport/http.hpp>
+#include <cppmcp/transport/http_server.hpp>
 
 cppmcp::Server server;
-cppmcp::transport::McpHttpHandler handler(server);
+cppmcp::transport::HttpOptions options;
+options.port = 8080;
+auto running = server.start_http(options);
 ```
 
-The handler validates modern request headers, body metadata, accepted response
-types, and origins before dispatching to the existing `Server`. It can produce
-a JSON response or a request-scoped SSE response. This is not a network server:
-Asio/llhttp adapters, `subscriptions/listen`, legacy HTTP sessions, and an HTTP
-client remain unimplemented.
+The `http_server` example exposes `echo`, `add`, `slow_count`, `emit_demo`, and
+`weather_like` tools:
+
+```sh
+./build/cppmcp_http_server --port 8000
+```
+
+The in-process `McpHttpHandler` remains available for applications that supply
+their own HTTP exchange adapter. TLS, `subscriptions/listen`, legacy HTTP
+sessions, and an HTTP client remain unimplemented.

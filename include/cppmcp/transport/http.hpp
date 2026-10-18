@@ -53,6 +53,15 @@ struct HttpHandlerOptions {
     std::vector<std::string> allowed_origins;
 };
 
+struct HttpOptions {
+    std::string bind_address = "127.0.0.1";
+    unsigned short port = 8000;
+    std::string bearer_token;
+    HttpHandlerOptions handler;
+    std::size_t max_header_bytes = 32 * 1024;
+    std::size_t max_body_bytes = 16 * 1024 * 1024;
+};
+
 class McpHttpHandler {
 public:
     explicit McpHttpHandler(Server& server, HttpHandlerOptions options = {});

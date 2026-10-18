@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -11,8 +12,13 @@
 #include "cppmcp/core/json_rpc.hpp"
 #include "cppmcp/core/meta.hpp"
 #include "cppmcp/core/version.hpp"
+#include "cppmcp/transport/http_server.hpp"
 
 namespace cppmcp {
+
+namespace transport {
+struct HttpOptions;
+}  // namespace transport
 
 struct ServerInfo {
     std::string name;
@@ -65,6 +71,9 @@ public:
     core::Message handle_message(const core::Message& message);
     core::Message handle_request(const core::Request& request);
     core::Message handle_notification(const core::Notification& notification);
+
+    void run_http(const transport::HttpOptions& options);
+    std::unique_ptr<transport::HttpServerHandle> start_http(const transport::HttpOptions& options);
 
 private:
     std::string request_protocol_version(const core::Json& params) const;

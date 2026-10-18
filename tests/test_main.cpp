@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <string>
 
 #include "cppmcp/core/log.hpp"
 
@@ -33,18 +34,34 @@ void run(const char* name, Fn fn) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     // Tests log at info by default; override with CPPMCP_LOG_LEVEL=warn|debug|trace
     // and optionally CPPMCP_LOG_FILE=/path/to/file.log
     cppmcp::core::log::configure(cppmcp::core::log::Level::info);
 
-    run("test_json_rpc", test_json_rpc);
-    run("test_versions", test_versions);
-    run("test_schema_contract", test_schema_contract);
-    run("test_phase2_memory_roundtrip", test_phase2_memory_roundtrip);
-    run("test_phase2_stdio_roundtrip", test_phase2_stdio_roundtrip);
-    run("test_http_handler", test_http_handler);
-    run("test_cancellation_strategy", test_cancellation_strategy);
+    if (argc > 2) {
+        CPPMCP_LOG_ERROR("usage: cppmcp_core_tests [case-name]");
+        return EXIT_FAILURE;
+    }
+    const std::string selected = argc == 2 ? argv[1] : "";
+    bool found = selected.empty();
+    const auto run_selected = [&](const char* name, auto test) {
+        if (selected.empty() || selected == name) {
+            found = true;
+            run(name, test);
+        }
+    };
+    run_selected("json_rpc", test_json_rpc);
+    run_selected("versions", test_versions);
+    run_selected("schema_contract", test_schema_contract);
+    run_selected("phase2_memory", test_phase2_memory_roundtrip);
+    run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
+    run_selected("http_handler", test_http_handler);
+    run_selected("cancellation", test_cancellation_strategy);
+    if (!found) {
+        CPPMCP_LOG_ERROR("unknown test case: " << selected);
+        return EXIT_FAILURE;
+    }
 
     if (cppmcp::test::failures != 0) {
         CPPMCP_LOG_ERROR(cppmcp::test::failures << " check(s) failed");

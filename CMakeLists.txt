@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(cppmcp VERSION 0.1.0 LANGUAGES CXX)
+project(cppmcp VERSION 0.1.0 LANGUAGES C CXX)
 
 include(FetchContent)
 include(GNUInstallDirs)
@@ -27,6 +27,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+FetchContent_Declare(
+    asio
+    URL https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz
+    URL_HASH SHA256=755bd7f85a4b269c67ae0ea254907c078d408cce8e1a352ad2ed664d233780e8
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(asio)
+
+FetchContent_Declare(
+    llhttp
+    URL https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.2.1.tar.gz
+    URL_HASH SHA256=3c163891446e529604b590f9ad097b2e98b5ef7e4d3ddcf1cf98b62ca668f23e
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR cppmcp-source-only
+)
+FetchContent_MakeAvailable(llhttp)
+
 set(CPPMCP_SOURCES
     src/json_rpc.cpp
     src/version.cpp
@@ -47,6 +64,7 @@ set(CPPMCP_TRANSPORT_STDIO_SOURCES
 
 set(CPPMCP_TRANSPORT_HTTP_SOURCES
     src/http_handler.cpp
+    src/http_server.cpp
 )
 
 function(cppmcp_configure_warnings target)
@@ -78,6 +96,14 @@ function(cppmcp_configure_library target)
 endfunction()
 
 if(CPPMCP_BUILD_STATIC)
+    add_library(cppmcp_llhttp OBJECT
+        ${llhttp_SOURCE_DIR}/src/llhttp.c
+        ${llhttp_SOURCE_DIR}/src/http.c
+        ${llhttp_SOURCE_DIR}/src/api.c
+    )
+    target_include_directories(cppmcp_llhttp SYSTEM PRIVATE ${llhttp_SOURCE_DIR}/include)
+    set_target_properties(cppmcp_llhttp PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED ON)
+
     add_library(cppmcp_core STATIC ${CPPMCP_SOURCES})
     add_library(cppmcp::core ALIAS cppmcp_core)
     cppmcp_configure_library(cppmcp_core)
@@ -106,6 +132,13 @@ if(CPPMCP_BUILD_STATIC)
     cppmcp_configure_library(cppmcp_transport_http)
     set_target_properties(cppmcp_transport_http PROPERTIES EXPORT_NAME transport_http)
     target_link_libraries(cppmcp_transport_http PUBLIC cppmcp_server cppmcp_core)
+    target_sources(cppmcp_transport_http PRIVATE $<TARGET_OBJECTS:cppmcp_llhttp>)
+    target_include_directories(cppmcp_transport_http SYSTEM PRIVATE
+        ${llhttp_SOURCE_DIR}/include
+    )
+    target_include_directories(cppmcp_transport_http SYSTEM PRIVATE
+        ${asio_SOURCE_DIR}/asio/include
+    )
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -171,6 +204,11 @@ target_link_libraries(cppmcp_stdio_client PRIVATE cppmcp::client cppmcp::transpo
 target_compile_features(cppmcp_stdio_client PRIVATE cxx_std_20)
 cppmcp_configure_warnings(cppmcp_stdio_client)
 
+add_executable(cppmcp_http_server examples/http_server/main.cpp)
+target_link_libraries(cppmcp_http_server PRIVATE cppmcp::server cppmcp::transport_http)
+target_compile_features(cppmcp_http_server PRIVATE cxx_std_20)
+cppmcp_configure_warnings(cppmcp_http_server)
+
 if(CPPMCP_BUILD_TESTS)
     enable_testing()
     add_executable(cppmcp_core_tests
@@ -192,5 +230,9 @@ if(CPPMCP_BUILD_TESTS)
     target_compile_definitions(cppmcp_core_tests PRIVATE
         CPPMCP_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schema/2026-07-28/schema.json"
     )
-    add_test(NAME cppmcp_core_tests COMMAND cppmcp_core_tests)
+    foreach(test_name IN ITEMS
+            json_rpc versions schema_contract phase2_memory phase2_stdio
+            http_handler cancellation)
+        add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
+    endforeach()
 endif()

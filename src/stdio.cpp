@@ -191,6 +191,9 @@ void StdioServerTransport::read_loop() {
             current.push_back(ch);
         }
     }
+    if (!current.empty()) {
+        handle_line(std::move(current));
+    }
     // stdin reached EOF (or errored): tell the owner exactly once. Do NOT call
     // close() from this callback (it would join this very thread); just signal
     // the main thread and let it call close().
