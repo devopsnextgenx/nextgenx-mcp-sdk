@@ -12,11 +12,9 @@ cmake -S "$repo_root" -B "$build_dir" \
 cmake --build "$build_dir" --parallel \
     --target cppmcp_transport_http cppmcp_stdio_client cppmcp_stdio_server cppmcp_core_tests
 
-ctest --test-dir "$build_dir" --output-on-failure
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0"},"io.modelcontextprotocol/clientCapabilities":{}}}}' \
+  | "$build_dir/cppmcp_stdio_server" | head -n1 | jq -e '.result.tools | length > 0'
 
-# Keep the stdio smoke check alongside the HTTP + test build coverage.
-if [[ -x "$build_dir/cppmcp_stdio_server" && -x "$build_dir/cppmcp_stdio_client" ]]; then
-    "$build_dir/cppmcp_stdio_client" "$build_dir/cppmcp_stdio_server" >/dev/null 2>&1 || true
-fi
+ctest --test-dir "$build_dir" --output-on-failure
 
 echo "Build and validation complete for stdio + HTTP transport targets and the test suite."
