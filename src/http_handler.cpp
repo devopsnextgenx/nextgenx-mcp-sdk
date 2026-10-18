@@ -1044,10 +1044,6 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             return;
         }
 
-        auto& stream = exchange->begin_sse(
-            200, {{"Content-Type", "text/event-stream"},
-                  {"Cache-Control", "no-cache"},
-                  {"X-Accel-Buffering", "no"}});
         const auto request_id =
             std::visit([](const auto& id) -> core::Json { return id; }, rpc_request.id);
         const core::Json acknowledgement{
@@ -1062,6 +1058,10 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                 active_registry->unsubscribe(subscriber_id);
             }
         });
+        auto& stream = exchange->begin_sse(
+            200, {{"Content-Type", "text/event-stream"},
+                  {"Cache-Control", "no-cache"},
+                  {"X-Accel-Buffering", "no"}});
         stream.write_event(acknowledgement.dump());
 
         for (;;) {

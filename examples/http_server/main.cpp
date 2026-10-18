@@ -10,6 +10,7 @@
 #include <string>
 #include <stop_token>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -167,6 +168,8 @@ std::chrono::milliseconds parse_ping_interval_ms(const std::string& value) {
 int main(int argc, char** argv) {
     try {
         cppmcp::transport::HttpOptions options;
+        std::string tls_cert;
+        std::string tls_key;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
             if (argument == "--port" && i + 1 < argc) {
@@ -182,15 +185,31 @@ int main(int argc, char** argv) {
                 options.notify_interval = parse_ping_interval_ms(argv[++i]);
             } else if (argument == "--allow-non-loopback") {
                 options.allow_non_loopback = true;
+                options.allow_insecure_remote = true;
+            } else if (argument == "--allow-insecure-remote") {
+                options.allow_insecure_remote = true;
             } else if (argument == "--json-only") {
                 options.handler.response_mode = cppmcp::transport::HttpResponseMode::json_only;
             } else if (argument == "--sse-only") {
                 options.handler.response_mode = cppmcp::transport::HttpResponseMode::sse_only;
             } else if (argument == "--token" && i + 1 < argc) {
                 options.bearer_token = argv[++i];
+            } else if (argument == "--tls-cert" && i + 1 < argc) {
+                tls_cert = argv[++i];
+            } else if (argument == "--tls-key" && i + 1 < argc) {
+                tls_key = argv[++i];
             } else {
                 throw std::invalid_argument("unknown or incomplete option: " + argument);
             }
+        }
+        if (tls_cert.empty() != tls_key.empty()) {
+            throw std::invalid_argument("--tls-cert and --tls-key must be supplied together");
+        }
+        if (!tls_cert.empty()) {
+            options.tls = cppmcp::transport::HttpTlsOptions{
+                .cert_chain_file = std::move(tls_cert),
+                .private_key_file = std::move(tls_key),
+            };
         }
 
         cppmcp::Server server({"cppmcp-http-server", "cppmcp HTTP server", "0.1.0"});

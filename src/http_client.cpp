@@ -3,6 +3,11 @@
 
 #include <asio.hpp>
 #include <llhttp.h>
+#if CPPMCP_WITH_TLS
+#include <asio/ssl.hpp>
+#include <openssl/ssl.h>
+#include <openssl/x509_vfy.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -19,6 +24,8 @@
 #include <string_view>
 #include <thread>
 
+#include "cppmcp/core/log.hpp"
+
 namespace cppmcp {
 namespace {
 
@@ -27,6 +34,7 @@ struct Url {
     std::string port;
     std::string target;
     std::string authority;
+    bool tls = false;
 };
 
 struct Response {
@@ -228,17 +236,21 @@ std::string_view trim(std::string_view text) {
 }
 
 Url parse_url(std::string_view value) {
-    constexpr std::string_view scheme = "http://";
-    if (!value.starts_with(scheme)) {
-        throw std::invalid_argument("HTTP client currently requires an http:// URL");
+    const bool tls = value.starts_with("https://");
+    if (tls) {
+        value.remove_prefix(8);
+    } else if (value.starts_with("http://")) {
+        value.remove_prefix(7);
+    } else {
+        throw std::invalid_argument("HTTP client URL must use http:// or https://");
     }
-    value.remove_prefix(scheme.size());
     const auto path_start = value.find_first_of("/?#");
     const auto authority = value.substr(0, path_start);
     if (authority.empty() || authority.find('@') != std::string_view::npos) {
         throw std::invalid_argument("HTTP client URL must have a host and no user information");
     }
     Url result;
+    result.tls = tls;
     result.authority.assign(authority);
     result.target = path_start == std::string_view::npos ? "/" : std::string(value.substr(path_start));
     if (result.target.front() == '?' || result.target.front() == '#') {
@@ -269,10 +281,67 @@ Url parse_url(std::string_view value) {
         throw std::invalid_argument("HTTP client URL host must not be empty");
     }
     if (result.port.empty()) {
-        result.port = "80";
+        result.port = tls ? "443" : "80";
     }
     return result;
 }
+
+#if CPPMCP_WITH_TLS
+void configure_client_tls_context(asio::ssl::context& context,
+                                  const HttpClientOptions& options) {
+    context.set_default_verify_paths();
+    if (!options.ca_file.empty()) {
+        context.load_verify_file(options.ca_file);
+    }
+}
+
+template <typename SslStream>
+void prepare_client_tls_stream(SslStream& stream, const Url& url,
+                               const HttpClientOptions& options) {
+    if (options.dangerous_disable_verification) {
+        stream.set_verify_mode(asio::ssl::verify_none);
+        CPPMCP_LOG_WARN("DANGEROUS: TLS certificate and hostname verification disabled");
+    } else {
+        stream.set_verify_mode(asio::ssl::verify_peer);
+        stream.set_verify_callback(asio::ssl::host_name_verification(url.host));
+    }
+    if (SSL_set_tlsext_host_name(stream.native_handle(), url.host.c_str()) != 1) {
+        throw std::runtime_error("TLS failed to set the server name");
+    }
+}
+
+template <typename SslStream>
+void perform_client_tls_handshake(SslStream& stream,
+                                  std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    for (;;) {
+        asio::error_code error;
+        stream.handshake(asio::ssl::stream_base::client, error);
+        if (!error) {
+            return;
+        }
+        if (error == asio::error::would_block || error == asio::error::try_again) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("TLS handshake timed out");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        const long verify_result = SSL_get_verify_result(stream.native_handle());
+        std::string reason = error.message();
+        if (verify_result == X509_V_ERR_CERT_HAS_EXPIRED) {
+            reason = "certificate has expired";
+        } else if (verify_result == X509_V_ERR_HOSTNAME_MISMATCH ||
+                   verify_result == X509_V_ERR_IP_ADDRESS_MISMATCH) {
+            reason = "certificate hostname or IP address mismatch";
+        } else if (verify_result != X509_V_OK) {
+            reason = "certificate verification failed (untrusted CA or invalid chain): " +
+                     std::string(X509_verify_cert_error_string(verify_result));
+        }
+        throw std::runtime_error("TLS handshake failed: " + reason);
+    }
+}
+#endif
 
 std::optional<std::string> header_value(const transport::Headers& headers,
                                         std::string_view wanted) {
@@ -441,12 +510,23 @@ namespace transport {
 struct HttpClientTransport::Impl {
     explicit Impl(HttpClientOptions client_options)
         : options(std::move(client_options)), url(parse_url(options.url)), resolver(context),
-          socket(context) {
+          socket(context)
+#if CPPMCP_WITH_TLS
+          , tls_context(asio::ssl::context::tls_client)
+#endif
+    {
         if (options.max_response_bytes == 0) {
             throw std::invalid_argument("maximum HTTP response size must be greater than zero");
         }
         if (options.connect_timeout.count() <= 0 || options.request_timeout.count() <= 0) {
             throw std::invalid_argument("HTTP client timeouts must be greater than zero");
+        }
+        if (url.tls) {
+#if CPPMCP_WITH_TLS
+            configure_client_tls_context(tls_context, options);
+#else
+            throw std::runtime_error("HTTPS is unavailable; rebuild with CPPMCP_WITH_TLS");
+#endif
         }
     }
 
@@ -455,11 +535,41 @@ struct HttpClientTransport::Impl {
     asio::io_context context;
     asio::ip::tcp::resolver resolver;
     asio::ip::tcp::socket socket;
+#if CPPMCP_WITH_TLS
+    asio::ssl::context tls_context;
+    std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket&>> tls_socket;
+#endif
     std::mutex mutex;
     std::string session_id;
     bool modern = true;
     bool started = false;
     bool closed = false;
+
+    void close_socket() {
+#if CPPMCP_WITH_TLS
+        tls_socket.reset();
+#endif
+        asio::error_code ignored;
+        socket.close(ignored);
+    }
+
+    std::size_t write_some(asio::const_buffer buffer, asio::error_code& error) {
+#if CPPMCP_WITH_TLS
+        if (tls_socket) {
+            return tls_socket->write_some(buffer, error);
+        }
+#endif
+        return socket.write_some(buffer, error);
+    }
+
+    std::size_t read_some(asio::mutable_buffer buffer, asio::error_code& error) {
+#if CPPMCP_WITH_TLS
+        if (tls_socket) {
+            return tls_socket->read_some(buffer, error);
+        }
+#endif
+        return socket.read_some(buffer, error);
+    }
 
     void connect_socket() {
         if (socket.is_open()) {
@@ -505,6 +615,19 @@ struct HttpClientTransport::Impl {
             throw std::runtime_error("HTTP connection failed: " + error_text);
         }
         socket.non_blocking(true);
+#if CPPMCP_WITH_TLS
+        if (url.tls) {
+            tls_socket =
+                std::make_unique<asio::ssl::stream<asio::ip::tcp::socket&>>(socket, tls_context);
+            try {
+                prepare_client_tls_stream(*tls_socket, url, options);
+                perform_client_tls_handshake(*tls_socket, options.connect_timeout);
+            } catch (...) {
+                close_socket();
+                throw;
+            }
+        }
+#endif
     }
 
     Response perform(std::string_view body, std::string_view method,
@@ -557,18 +680,18 @@ struct HttpClientTransport::Impl {
         std::size_t written = 0;
         while (written < request_text.size()) {
             asio::error_code error;
-            written += socket.write_some(
+            written += write_some(
                 asio::buffer(request_text.data() + written, request_text.size() - written),
                 error);
             if (!error) {
                 continue;
             }
             if (error != asio::error::would_block && error != asio::error::try_again) {
-                socket.close();
+                close_socket();
                 throw std::runtime_error("HTTP request write failed: " + error.message());
             }
             if (std::chrono::steady_clock::now() >= deadline) {
-                socket.close();
+                close_socket();
                 throw std::runtime_error("HTTP request timed out");
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -583,7 +706,7 @@ struct HttpClientTransport::Impl {
         std::array<char, 8192> buffer{};
         while (!response.complete) {
             asio::error_code error;
-            const auto count = socket.read_some(asio::buffer(buffer), error);
+            const auto count = read_some(asio::buffer(buffer), error);
             if (error == asio::error::would_block || error == asio::error::try_again) {
                 if (std::chrono::steady_clock::now() >= deadline) {
                     throw std::runtime_error("HTTP response timed out");
@@ -592,24 +715,23 @@ struct HttpClientTransport::Impl {
                 continue;
             }
             if (error) {
-                socket.close();
+                close_socket();
                 throw std::runtime_error("HTTP response read failed: " + error.message());
             }
             if (std::chrono::steady_clock::now() >= deadline) {
-                socket.close();
+                close_socket();
                 throw std::runtime_error("HTTP response timed out");
             }
             const auto parsed = llhttp_execute(&parser, buffer.data(), count);
             if (parsed != HPE_OK && parsed != HPE_PAUSED) {
-                socket.close();
+                close_socket();
                 const auto* reason = llhttp_get_error_reason(&parser);
                 throw std::runtime_error("invalid HTTP response: " +
                                          std::string(reason == nullptr ? "parse error" : reason));
             }
         }
         if (header_value(response.headers, "Connection") == "close") {
-            asio::error_code ignored;
-            socket.close(ignored);
+            close_socket();
         }
         if (response.status == 401 || response.status == 403) {
             std::vector<std::string> challenge_headers;
@@ -621,8 +743,7 @@ struct HttpClientTransport::Impl {
             const auto challenge = challenge_for(challenge_headers);
             if (!challenged && options.auth_provider &&
                 options.auth_provider->on_challenge(challenge) == AuthAction::retry) {
-                asio::error_code ignored;
-                socket.close(ignored);
+                close_socket();
                 return perform(body, method, name, initialize, notification, mirrored, true);
             }
             if (response.status == 401) {
@@ -790,7 +911,17 @@ struct ListenHandle::Impl {
         : options(std::move(client_options)), url(std::move(endpoint)),
           modern(modern_mode), session_id(std::move(legacy_session_id)),
           filter(std::move(requested_filter)), callback(std::move(notify_callback)),
-          callbacks(std::move(listen_callbacks)), reconnect(std::move(reconnect_options)) {}
+          callbacks(std::move(listen_callbacks)), reconnect(std::move(reconnect_options))
+#if CPPMCP_WITH_TLS
+          , tls_context(asio::ssl::context::tls_client)
+#endif
+    {
+#if CPPMCP_WITH_TLS
+        if (url.tls) {
+            configure_client_tls_context(tls_context, options);
+        }
+#endif
+    }
 
     HttpClientOptions options;
     Url url;
@@ -800,6 +931,9 @@ struct ListenHandle::Impl {
     std::function<void(const core::Notification&)> callback;
     ListenCallbacks callbacks;
     ListenOptions reconnect;
+#if CPPMCP_WITH_TLS
+    asio::ssl::context tls_context;
+#endif
     std::mutex startup_mutex;
     std::condition_variable startup_condition;
     bool startup_ready = false;
@@ -986,6 +1120,33 @@ struct ListenHandle::Impl {
             return false;
         }
 
+#if CPPMCP_WITH_TLS
+        std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket&>> tls_socket;
+        if (url.tls) {
+            tls_socket =
+                std::make_unique<asio::ssl::stream<asio::ip::tcp::socket&>>(*socket,
+                                                                            tls_context);
+            prepare_client_tls_stream(*tls_socket, url, options);
+            perform_client_tls_handshake(*tls_socket, options.connect_timeout);
+        }
+#endif
+        auto write_some = [&](asio::const_buffer buffer, asio::error_code& error) {
+#if CPPMCP_WITH_TLS
+            if (tls_socket) {
+                return tls_socket->write_some(buffer, error);
+            }
+#endif
+            return socket->write_some(buffer, error);
+        };
+        auto read_some = [&](asio::mutable_buffer buffer, asio::error_code& error) {
+#if CPPMCP_WITH_TLS
+            if (tls_socket) {
+                return tls_socket->read_some(buffer, error);
+            }
+#endif
+            return socket->read_some(buffer, error);
+        };
+
         core::Json request_id;
         std::string request_text;
         transport::Headers headers;
@@ -1044,7 +1205,7 @@ struct ListenHandle::Impl {
         while (written < request_text.size() && !stop.stop_requested() &&
                !stop_requested.load(std::memory_order_acquire)) {
             asio::error_code error;
-            written += socket->write_some(
+            written += write_some(
                 asio::buffer(request_text.data() + written, request_text.size() - written),
                 error);
             if (!error) {
@@ -1152,7 +1313,7 @@ struct ListenHandle::Impl {
         while (!stop.stop_requested() &&
                !stop_requested.load(std::memory_order_acquire) && !graceful) {
             asio::error_code error;
-            const auto count = socket->read_some(asio::buffer(buffer), error);
+            const auto count = read_some(asio::buffer(buffer), error);
             if (error == asio::error::would_block || error == asio::error::try_again) {
                 if (!connected_this_attempt &&
                     std::chrono::steady_clock::now() >= deadline) {
@@ -1316,12 +1477,28 @@ void HttpClientTransport::close() {
                 << "MCP-Protocol-Version: 2025-11-25\r\n"
                 << "Connection: close\r\nContent-Length: 0\r\n\r\n";
         const auto request_text = request.str();
-        asio::error_code write_error;
-        asio::write(impl_->socket, asio::buffer(request_text), write_error);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::min(impl_->options.request_timeout,
+                                       std::chrono::milliseconds(1000));
+        std::size_t written = 0;
+        while (written < request_text.size() &&
+               std::chrono::steady_clock::now() < deadline) {
+            asio::error_code write_error;
+            written += impl_->write_some(
+                asio::buffer(request_text.data() + written, request_text.size() - written),
+                write_error);
+            if (write_error && write_error != asio::error::would_block &&
+                write_error != asio::error::try_again) {
+                break;
+            }
+            if (write_error) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
     }
     asio::error_code ignored;
     impl_->socket.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
-    impl_->socket.close(ignored);
+    impl_->close_socket();
     impl_->closed = true;
     if (on_close_) {
         on_close_(core::CloseReason::normal);

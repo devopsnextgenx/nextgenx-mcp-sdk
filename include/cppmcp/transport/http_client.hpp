@@ -60,6 +60,7 @@ struct HttpClientOptions {
     std::chrono::milliseconds request_timeout{15000};
     std::size_t max_response_bytes = 16 * 1024 * 1024;
     std::string ca_file;
+    bool dangerous_disable_verification = false;
     std::shared_ptr<IAuthProvider> auth_provider;
 };
 

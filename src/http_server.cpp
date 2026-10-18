@@ -5,6 +5,9 @@
 
 #include <asio.hpp>
 #include <llhttp.h>
+#if CPPMCP_WITH_TLS
+#include <asio/ssl.hpp>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -20,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -29,6 +33,15 @@ namespace cppmcp::transport {
 namespace {
 
 using Tcp = asio::ip::tcp;
+
+template <typename Stream>
+Tcp::socket& lowest_socket(Stream& stream) {
+    if constexpr (std::is_same_v<Stream, Tcp::socket>) {
+        return stream;
+    } else {
+        return stream.next_layer();
+    }
+}
 
 struct ParseState {
     HttpRequest request;
@@ -194,13 +207,16 @@ std::string reason_phrase(int status) {
     }
 }
 
+template <typename Stream>
 class SocketSseStream final : public SseStream {
 public:
-    SocketSseStream(std::shared_ptr<Tcp::socket> socket,
+    SocketSseStream(std::shared_ptr<Stream> socket,
+                    std::shared_ptr<Tcp::socket> raw_socket,
                     std::shared_ptr<DisconnectWatch> disconnect_watch,
                     std::size_t max_queue_bytes,
                     std::chrono::milliseconds keep_alive_interval)
-        : socket_(std::move(socket)), disconnect_watch_(std::move(disconnect_watch)),
+        : socket_(std::move(socket)), raw_socket_(std::move(raw_socket)),
+          disconnect_watch_(std::move(disconnect_watch)),
           max_queue_bytes_(max_queue_bytes), keep_alive_interval_(keep_alive_interval),
           writer_([this] { write_loop(); }) {}
 
@@ -273,8 +289,8 @@ private:
         if (overflow) {
             notify_disconnect(disconnect_watch_);
             asio::error_code ignored;
-            socket_->shutdown(Tcp::socket::shutdown_both, ignored);
-            socket_->close(ignored);
+            raw_socket_->shutdown(Tcp::socket::shutdown_both, ignored);
+            raw_socket_->close(ignored);
             throw std::runtime_error("SSE outbound queue limit exceeded");
         }
     }
@@ -315,6 +331,7 @@ private:
             }
             if (finish) {
                 write_bytes("0\r\n\r\n");
+                close_tls_notify();
                 return;
             }
             if (keep_alive) {
@@ -326,7 +343,17 @@ private:
         }
     }
 
-    std::shared_ptr<Tcp::socket> socket_;
+    void close_tls_notify() {
+#if CPPMCP_WITH_TLS
+        if constexpr (!std::is_same_v<Stream, Tcp::socket>) {
+            asio::error_code ignored;
+            socket_->shutdown(ignored);
+        }
+#endif
+    }
+
+    std::shared_ptr<Stream> socket_;
+    std::shared_ptr<Tcp::socket> raw_socket_;
     std::shared_ptr<DisconnectWatch> disconnect_watch_;
     const std::size_t max_queue_bytes_;
     const std::chrono::milliseconds keep_alive_interval_;
@@ -339,18 +366,21 @@ private:
     std::thread writer_;
 };
 
+template <typename Stream>
 class SocketExchange final : public IHttpExchange {
 public:
-    SocketExchange(std::shared_ptr<Tcp::socket> socket, HttpRequest request,
+    SocketExchange(std::shared_ptr<Stream> socket,
+                   std::shared_ptr<Tcp::socket> raw_socket, HttpRequest request,
                    bool keep_alive, const HttpOptions& options)
-        : socket_(std::move(socket)), request_(std::move(request)),
+        : socket_(std::move(socket)), raw_socket_(std::move(raw_socket)),
+          request_(std::move(request)),
           keep_alive_(keep_alive), options_(options) {}
 
     ~SocketExchange() override {
         if (disconnect_watch_) {
             disconnect_watch_->stopped.store(true, std::memory_order_release);
             asio::error_code ignored;
-            socket_->cancel(ignored);
+            raw_socket_->cancel(ignored);
         }
     }
 
@@ -387,8 +417,8 @@ public:
         }
         response += "\r\n";
         write(std::move(response));
-        stream_ = std::make_unique<SocketSseStream>(
-            socket_, disconnect_watch_, options_.sse_queue_max_bytes,
+        stream_ = std::make_unique<SocketSseStream<Stream>>(
+            socket_, raw_socket_, disconnect_watch_, options_.sse_queue_max_bytes,
             options_.sse_keep_alive_interval);
         return *stream_;
     }
@@ -396,7 +426,7 @@ public:
     void on_disconnect(std::function<void()> callback) override {
         disconnect_watch_ = std::make_shared<DisconnectWatch>();
         disconnect_watch_->callback = std::move(callback);
-        watch_for_disconnect(socket_, disconnect_watch_);
+        watch_for_disconnect(raw_socket_, disconnect_watch_);
     }
 
 private:
@@ -411,13 +441,14 @@ private:
         }
     }
 
-    std::shared_ptr<Tcp::socket> socket_;
+    std::shared_ptr<Stream> socket_;
+    std::shared_ptr<Tcp::socket> raw_socket_;
     HttpRequest request_;
     bool keep_alive_;
     const HttpOptions& options_;
     bool responded_ = false;
     std::shared_ptr<DisconnectWatch> disconnect_watch_;
-    std::unique_ptr<SocketSseStream> stream_;
+    std::unique_ptr<SocketSseStream<Stream>> stream_;
 };
 
 bool connection_wants_keep_alive(const ParseState& state, const llhttp_t& parser) {
@@ -437,23 +468,27 @@ bool connection_wants_keep_alive(const ParseState& state, const llhttp_t& parser
     return false;
 }
 
-void send_bad_request(const std::shared_ptr<Tcp::socket>& socket, int status) {
+template <typename Stream>
+void send_bad_request(const std::shared_ptr<Stream>& socket,
+                      const std::shared_ptr<Tcp::socket>& raw_socket, int status) {
     const auto response = "HTTP/1.1 " + std::to_string(status) + " " +
                           reason_phrase(status) +
                           "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     asio::error_code ignored;
     asio::write(*socket, asio::buffer(response), ignored);
-    socket->shutdown(Tcp::socket::shutdown_both, ignored);
-    socket->close(ignored);
+    raw_socket->shutdown(Tcp::socket::shutdown_both, ignored);
+    raw_socket->close(ignored);
 }
 
-void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
+template <typename Stream>
+void serve_connection(const std::shared_ptr<Stream>& socket,
+                      const std::shared_ptr<Tcp::socket>& raw_socket,
                       const McpHttpHandler& handler, const HttpOptions& options) {
     ParseState state;
     state.max_header_bytes = options.max_header_bytes;
     state.max_body_bytes = options.max_body_bytes;
     asio::error_code endpoint_error;
-    const auto endpoint = socket->remote_endpoint(endpoint_error);
+    const auto endpoint = raw_socket->remote_endpoint(endpoint_error);
     if (!endpoint_error) {
         state.request.peer.remote_address = endpoint.address().to_string();
     }
@@ -462,20 +497,20 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
     llhttp_t parser;
     llhttp_init(&parser, HTTP_REQUEST, &settings);
     parser.data = &state;
-    socket->non_blocking(true);
+    lowest_socket(*socket).non_blocking(true);
     std::array<char, 8192> buffer{};
     std::string pending;
     bool request_started = false;
     auto deadline = std::chrono::steady_clock::now() + options.idle_timeout;
 
-    while (socket->is_open()) {
+    while (raw_socket->is_open()) {
         if (pending.empty()) {
             asio::error_code error;
             const auto count = socket->read_some(asio::buffer(buffer), error);
             if (error == asio::error::would_block || error == asio::error::try_again) {
                 if (std::chrono::steady_clock::now() >= deadline) {
                     if (request_started) {
-                        send_bad_request(socket, 408);
+                        send_bad_request(socket, raw_socket, 408);
                     }
                     break;
                 }
@@ -496,9 +531,9 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
         const bool headers_were_complete = state.headers_complete;
         const auto parsed = llhttp_execute(&parser, pending.data(), pending.size());
         if (parsed != HPE_OK && parsed != HPE_PAUSED) {
-            send_bad_request(socket, state.rejection_status != 0
-                                         ? state.rejection_status
-                                         : 400);
+            send_bad_request(socket, raw_socket, state.rejection_status != 0
+                                                      ? state.rejection_status
+                                                      : 400);
             break;
         }
         if (!headers_were_complete && state.headers_complete) {
@@ -525,9 +560,9 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
                 state.request.target = *routed_target;
             }
         }
-        auto exchange = std::make_shared<SocketExchange>(socket, std::move(state.request),
-                                                          keep_alive, options);
-        socket->non_blocking(false);
+        auto exchange = std::make_shared<SocketExchange<Stream>>(
+            socket, raw_socket, std::move(state.request), keep_alive, options);
+        lowest_socket(*socket).non_blocking(false);
         try {
             std::vector<std::string_view> authorization;
             for (const auto& [name, value] : exchange->request().headers) {
@@ -555,7 +590,7 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
                 exchange->respond(500, {{"Content-Type", "text/plain"}}, "Internal Server Error");
             }
         }
-        if (!keep_alive || !socket->is_open()) {
+        if (!keep_alive || !raw_socket->is_open()) {
             break;
         }
 
@@ -571,11 +606,11 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
         request_started = !pending.empty();
         deadline = std::chrono::steady_clock::now() +
                    (request_started ? options.header_timeout : options.idle_timeout);
-        socket->non_blocking(true);
+        lowest_socket(*socket).non_blocking(true);
     }
     asio::error_code ignored;
-    socket->shutdown(Tcp::socket::shutdown_both, ignored);
-    socket->close(ignored);
+    raw_socket->shutdown(Tcp::socket::shutdown_both, ignored);
+    raw_socket->close(ignored);
 }
 
 std::atomic<bool> signal_shutdown{false};
@@ -606,10 +641,39 @@ struct HttpServerHandle::Impl {
     Impl(Server& server, const HttpOptions& server_options)
         : options(server_options), handler(server, options.handler), acceptor(context) {
         const auto address = asio::ip::make_address(options.bind_address);
-        if (!address.is_loopback() && !options.allow_non_loopback) {
+        const bool protected_remote = options.tls.has_value() ||
+                                      !options.bearer_token.empty() ||
+                                      static_cast<bool>(options.handler.authenticator);
+        if (!address.is_loopback() && !protected_remote &&
+            !options.allow_insecure_remote && !options.allow_non_loopback) {
             throw std::invalid_argument(
-                "non-loopback HTTP bind requires allow_non_loopback=true");
+                "non-loopback bind requires TLS, authentication, or allow_insecure_remote=true");
         }
+#if CPPMCP_WITH_TLS
+        if (options.tls) {
+            if (options.tls->cert_chain_file.empty() ||
+                options.tls->private_key_file.empty()) {
+                throw std::invalid_argument("TLS requires certificate chain and private key files");
+            }
+            tls_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
+            tls_context->set_options(asio::ssl::context::default_workarounds |
+                                     asio::ssl::context::no_sslv2 |
+                                     asio::ssl::context::no_sslv3);
+            const int minimum = options.tls->min_version == TlsVersion::tls_1_3
+                                    ? TLS1_3_VERSION
+                                    : TLS1_2_VERSION;
+            if (SSL_CTX_set_min_proto_version(tls_context->native_handle(), minimum) != 1) {
+                throw std::runtime_error("failed to configure minimum TLS version");
+            }
+            tls_context->use_certificate_chain_file(options.tls->cert_chain_file);
+            tls_context->use_private_key_file(options.tls->private_key_file,
+                                              asio::ssl::context::pem);
+        }
+#else
+        if (options.tls) {
+            throw std::runtime_error("TLS support is disabled; rebuild with CPPMCP_WITH_TLS");
+        }
+#endif
         if (options.max_header_bytes == 0 || options.max_body_bytes == 0 ||
             options.sse_queue_max_bytes == 0 ||
             options.header_timeout.count() <= 0 || options.body_timeout.count() <= 0 ||
@@ -648,7 +712,24 @@ struct HttpServerHandle::Impl {
                 try {
                     std::thread([this, socket] {
                         try {
-                            serve_connection(socket, handler, options);
+#if CPPMCP_WITH_TLS
+                            if (options.tls) {
+                                auto tls_stream =
+                                    std::make_shared<asio::ssl::stream<Tcp::socket&>>(
+                                        *socket, *tls_context);
+                                asio::error_code handshake_error;
+                                tls_stream->handshake(asio::ssl::stream_base::server,
+                                                      handshake_error);
+                                if (handshake_error) {
+                                    throw std::runtime_error(
+                                        "TLS handshake failed: " + handshake_error.message());
+                                }
+                                serve_connection(tls_stream, socket, handler, options);
+                            } else
+#endif
+                            {
+                                serve_connection(socket, socket, handler, options);
+                            }
                         } catch (const std::exception& error) {
                             CPPMCP_LOG_ERROR("HTTP connection failed: " << error.what());
                             asio::error_code ignored;
@@ -718,6 +799,9 @@ struct HttpServerHandle::Impl {
     HttpOptions options;
     McpHttpHandler handler;
     Tcp::acceptor acceptor;
+#if CPPMCP_WITH_TLS
+    std::unique_ptr<asio::ssl::context> tls_context;
+#endif
     std::atomic<bool> stopping{false};
     std::thread accept_thread;
     std::thread context_thread;

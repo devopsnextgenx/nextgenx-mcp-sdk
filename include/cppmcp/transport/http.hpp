@@ -102,11 +102,24 @@ struct HttpHandlerOptions {
     std::function<bool(const HttpRequest&)> authenticator;
 };
 
+enum class TlsVersion {
+    tls_1_2,
+    tls_1_3,
+};
+
+struct HttpTlsOptions {
+    std::string cert_chain_file;
+    std::string private_key_file;
+    TlsVersion min_version = TlsVersion::tls_1_2;
+};
+
 struct HttpOptions {
     std::string bind_address = "127.0.0.1";
     unsigned short port = 8000;
     std::string bearer_token;
     bool allow_non_loopback = false;
+    bool allow_insecure_remote = false;
+    std::optional<HttpTlsOptions> tls;
     HttpMode mode = HttpMode::dual;
     HttpHandlerOptions handler;
     std::function<std::optional<std::string>(const HttpRequest&)> route;
