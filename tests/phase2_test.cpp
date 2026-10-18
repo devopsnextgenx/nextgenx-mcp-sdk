@@ -17,6 +17,10 @@ void test_phase2_memory_roundtrip() {
         .name = "echo",
         .title = "Echo",
         .description = "Echo a value.",
+        .input_schema = nlohmann::json::object({{"type", "object"}}),
+        .output_schema = nlohmann::json::object(),
+        .annotations = ToolAnnotation{},
+        .meta = nlohmann::json::object(),
         .handler = [](const nlohmann::json& args, const nlohmann::json&) {
             return args.value("value", "");
         },

@@ -49,6 +49,14 @@ set(CPPMCP_TRANSPORT_HTTP_SOURCES
     src/http_handler.cpp
 )
 
+function(cppmcp_configure_warnings target)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+endfunction()
+
 function(cppmcp_configure_library target)
     target_compile_features(${target} PUBLIC cxx_std_20)
     target_include_directories(${target}
@@ -66,6 +74,7 @@ function(cppmcp_configure_library target)
         CXX_EXTENSIONS OFF
         POSITION_INDEPENDENT_CODE ON
     )
+    cppmcp_configure_warnings(${target})
 endfunction()
 
 if(CPPMCP_BUILD_STATIC)
@@ -154,13 +163,13 @@ install(FILES
 
 add_executable(cppmcp_stdio_server examples/stdio_server.cpp)
 target_link_libraries(cppmcp_stdio_server PRIVATE cppmcp::server cppmcp::transport_stdio)
-
 target_compile_features(cppmcp_stdio_server PRIVATE cxx_std_20)
+cppmcp_configure_warnings(cppmcp_stdio_server)
 
 add_executable(cppmcp_stdio_client examples/stdio_client.cpp)
 target_link_libraries(cppmcp_stdio_client PRIVATE cppmcp::client cppmcp::transport_stdio)
-
 target_compile_features(cppmcp_stdio_client PRIVATE cxx_std_20)
+cppmcp_configure_warnings(cppmcp_stdio_client)
 
 if(CPPMCP_BUILD_TESTS)
     enable_testing()
@@ -179,6 +188,7 @@ if(CPPMCP_BUILD_TESTS)
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core_shared)
     endif()
     target_compile_features(cppmcp_core_tests PRIVATE cxx_std_20)
+    cppmcp_configure_warnings(cppmcp_core_tests)
     target_compile_definitions(cppmcp_core_tests PRIVATE
         CPPMCP_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schema/2026-07-28/schema.json"
     )

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcppmcp_core.a CMakeFiles/cppmcp_core.dir/src/json_rpc.cpp.o CMakeFiles/cppmcp_core.dir/src/version.cpp.o CMakeFiles/cppmcp_core.dir/src/connection.cpp.o
+/usr/bin/ranlib libcppmcp_core.a

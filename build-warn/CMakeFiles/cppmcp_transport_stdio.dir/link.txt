@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcppmcp_transport_stdio.a CMakeFiles/cppmcp_transport_stdio.dir/src/stdio.cpp.o
+/usr/bin/ranlib libcppmcp_transport_stdio.a

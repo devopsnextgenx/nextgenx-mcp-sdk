@@ -72,6 +72,7 @@ HttpRequest make_request(std::string method, Json params = Json::object(),
                     {"MCP-Protocol-Version", protocol_version},
                     {"Mcp-Method", method}},
         .body = body.dump(),
+        .peer = cppmcp::transport::PeerInfo{},
     };
     return request;
 }
@@ -97,6 +98,10 @@ void add_echo_tool(Server& server, std::string value = "echo") {
         .name = "echo",
         .title = "Echo",
         .description = "Returns a server-specific value.",
+        .input_schema = Json::object({{"type", "object"}}),
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
         .handler = [value = std::move(value)](const Json&, const Json&) { return value; },
     });
 }
@@ -115,6 +120,10 @@ void test_http_handler() {
         .name = non_ascii_name,
         .title = "Encoded name",
         .description = "Checks the encoded Mcp-Name value.",
+        .input_schema = Json::object({{"type", "object"}}),
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
         .handler = [](const Json&, const Json&) { return "encoded"; },
     });
     McpHttpHandler handler(server);

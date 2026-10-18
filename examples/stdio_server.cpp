@@ -34,6 +34,10 @@ int main() {
         .name = "echo",
         .title = "Echo",
         .description = "Echo a value back to the client.",
+        .input_schema = nlohmann::json::object({{"type", "object"}}),
+        .output_schema = nlohmann::json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = nlohmann::json::object(),
         .handler = [](const nlohmann::json& args, const nlohmann::json&) {
             return args.value("value", nlohmann::json(nullptr));
         },
@@ -42,6 +46,10 @@ int main() {
         .name = "add",
         .title = "Add",
         .description = "Add two numbers.",
+        .input_schema = nlohmann::json::object({{"type", "object"}}),
+        .output_schema = nlohmann::json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = nlohmann::json::object(),
         .handler = [](const nlohmann::json& args, const nlohmann::json&) {
             const auto a = args.value("a", 0);
             const auto b = args.value("b", 0);

@@ -1,0 +1,1 @@
+/usr/bin/c++ -Wall -Wextra -Wpedantic -Werror -Wl,--dependency-file=CMakeFiles/cppmcp_stdio_client.dir/link.d CMakeFiles/cppmcp_stdio_client.dir/examples/stdio_client.cpp.o -o cppmcp_stdio_client  libcppmcp_client.a libcppmcp_transport_stdio.a libcppmcp_server.a libcppmcp_core.a
