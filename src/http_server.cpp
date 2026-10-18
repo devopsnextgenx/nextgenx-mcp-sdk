@@ -5,6 +5,11 @@
 
 #include <asio.hpp>
 #include <llhttp.h>
+#if defined(_WIN32)
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
 #if CPPMCP_WITH_TLS
 #include <asio/ssl.hpp>
 #endif
@@ -33,6 +38,20 @@ namespace cppmcp::transport {
 namespace {
 
 using Tcp = asio::ip::tcp;
+using NativeSocket = Tcp::socket::native_handle_type;
+
+void shutdown_native_socket(NativeSocket socket) {
+#if defined(_WIN32)
+    ::shutdown(socket, SD_BOTH);
+#else
+    ::shutdown(socket, SHUT_RDWR);
+#endif
+}
+
+struct ActiveConnection {
+    std::shared_ptr<Tcp::socket> socket;
+    NativeSocket native_socket;
+};
 
 template <typename Stream>
 Tcp::socket& lowest_socket(Stream& stream) {
@@ -476,8 +495,7 @@ void send_bad_request(const std::shared_ptr<Stream>& socket,
                           "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     asio::error_code ignored;
     asio::write(*socket, asio::buffer(response), ignored);
-    raw_socket->shutdown(Tcp::socket::shutdown_both, ignored);
-    raw_socket->close(ignored);
+    shutdown_native_socket(raw_socket->native_handle());
 }
 
 template <typename Stream>
@@ -608,9 +626,7 @@ void serve_connection(const std::shared_ptr<Stream>& socket,
                    (request_started ? options.header_timeout : options.idle_timeout);
         lowest_socket(*socket).non_blocking(true);
     }
-    asio::error_code ignored;
-    raw_socket->shutdown(Tcp::socket::shutdown_both, ignored);
-    raw_socket->close(ignored);
+    shutdown_native_socket(raw_socket->native_handle());
 }
 
 std::atomic<bool> signal_shutdown{false};
@@ -706,11 +722,11 @@ struct HttpServerHandle::Impl {
                         socket->close(error);
                         break;
                     }
-                    active_sockets.push_back(socket);
+                    active_sockets.push_back({socket, socket->native_handle()});
                     ++active_connections;
                 }
                 try {
-                    std::thread([this, socket] {
+                    std::thread([this, socket]() mutable {
                         try {
 #if CPPMCP_WITH_TLS
                             if (options.tls) {
@@ -732,14 +748,17 @@ struct HttpServerHandle::Impl {
                             }
                         } catch (const std::exception& error) {
                             CPPMCP_LOG_ERROR("HTTP connection failed: " << error.what());
-                            asio::error_code ignored;
-                            socket->close(ignored);
                         }
                         {
                             std::lock_guard<std::mutex> worker_lock(workers_mutex);
                             active_sockets.erase(
-                                std::remove(active_sockets.begin(), active_sockets.end(), socket),
+                                std::remove_if(
+                                    active_sockets.begin(), active_sockets.end(),
+                                    [&socket](const ActiveConnection& active) {
+                                        return active.socket == socket;
+                                    }),
                                 active_sockets.end());
+                            socket.reset();
                             --active_connections;
                             workers_cv.notify_all();
                         }
@@ -750,7 +769,11 @@ struct HttpServerHandle::Impl {
                     socket->close(ignored);
                     std::lock_guard<std::mutex> lock(workers_mutex);
                     active_sockets.erase(
-                        std::remove(active_sockets.begin(), active_sockets.end(), socket),
+                        std::remove_if(
+                            active_sockets.begin(), active_sockets.end(),
+                            [&socket](const ActiveConnection& active) {
+                                return active.socket == socket;
+                            }),
                         active_sockets.end());
                     --active_connections;
                     workers_cv.notify_all();
@@ -776,9 +799,8 @@ struct HttpServerHandle::Impl {
         acceptor.close(ignored);
         {
             std::lock_guard<std::mutex> lock(workers_mutex);
-            for (const auto& socket : active_sockets) {
-                socket->shutdown(Tcp::socket::shutdown_both, ignored);
-                socket->close(ignored);
+            for (const auto& active : active_sockets) {
+                shutdown_native_socket(active.native_socket);
             }
         }
         {
@@ -787,7 +809,6 @@ struct HttpServerHandle::Impl {
         }
         active_sockets.clear();
         work_guard.reset();
-        context.stop();
         if (context_thread.joinable()) {
             context_thread.join();
         }
@@ -808,7 +829,7 @@ struct HttpServerHandle::Impl {
     std::mutex workers_mutex;
     std::condition_variable workers_cv;
     std::size_t active_connections = 0;
-    std::vector<std::shared_ptr<Tcp::socket>> active_sockets;
+    std::vector<ActiveConnection> active_sockets;
     unsigned short bound_port = 0;
 };
 
