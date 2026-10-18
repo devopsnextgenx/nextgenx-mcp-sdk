@@ -189,6 +189,7 @@ std::string reason_phrase(int status) {
         case 500: return "Internal Server Error";
         case 408: return "Request Timeout";
         case 431: return "Request Header Fields Too Large";
+        case 429: return "Too Many Requests";
         default: return "Error";
     }
 }
@@ -221,6 +222,13 @@ public:
             offset = end + 1;
         }
         payload += "\r\n";
+        enqueue(make_chunk(payload));
+    }
+
+    void write_comment(std::string_view comment) override {
+        std::string payload = ": ";
+        payload.append(comment);
+        payload += "\r\n\r\n";
         enqueue(make_chunk(payload));
     }
 

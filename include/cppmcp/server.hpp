@@ -19,6 +19,8 @@ namespace cppmcp {
 
 namespace transport {
 struct HttpOptions;
+class McpHttpHandler;
+class SubscriptionRegistry;
 }  // namespace transport
 
 struct ServerInfo {
@@ -121,6 +123,11 @@ public:
     core::Message handle_request(const core::Request& request, ToolContext* context = nullptr);
     core::Message handle_notification(const core::Notification& notification);
 
+    void notify_tools_list_changed();
+    void notify_prompts_list_changed();
+    void notify_resources_list_changed();
+    void notify_resource_updated(std::string uri);
+
     void run_http(const transport::HttpOptions& options);
     std::unique_ptr<transport::HttpServerHandle> start_http(const transport::HttpOptions& options);
 
@@ -133,6 +140,9 @@ private:
     std::map<std::string, ToolDefinition> tools_;
     std::map<std::string, ContextToolHandler> context_handlers_;
     std::map<std::string, std::vector<HeaderParamDefinition>> header_params_;
+    std::shared_ptr<transport::SubscriptionRegistry> subscriptions_;
+
+    friend class transport::McpHttpHandler;
 };
 
 }  // namespace cppmcp

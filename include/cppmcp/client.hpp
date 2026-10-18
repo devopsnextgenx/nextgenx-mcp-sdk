@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -30,6 +31,11 @@ public:
     void close();
     void cancel(const cppmcp::core::RequestId& request_id);
     [[nodiscard]] std::string http_mode() const;
+    [[nodiscard]] std::shared_ptr<transport::ListenHandle> listen(
+        nlohmann::json filter,
+        std::function<void(const core::Notification&)> callback,
+        transport::ListenCallbacks callbacks = {},
+        transport::ListenOptions options = {});
 
     nlohmann::json discover();
     nlohmann::json list_tools();
@@ -41,6 +47,7 @@ private:
     NegotiationPolicy policy_;
     std::shared_ptr<cppmcp::core::ITransport> transport_;
     std::shared_ptr<cppmcp::core::Connection> connection_;
+    std::vector<std::function<void()>> listen_closers_;
 };
 
 }  // namespace cppmcp

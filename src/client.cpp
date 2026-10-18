@@ -14,6 +14,10 @@ void Client::connect(std::shared_ptr<cppmcp::core::ITransport> transport) {
 }
 
 void Client::close() {
+    for (const auto& close_listen : listen_closers_) {
+        close_listen();
+    }
+    listen_closers_.clear();
     if (connection_) {
         connection_->close();
     }

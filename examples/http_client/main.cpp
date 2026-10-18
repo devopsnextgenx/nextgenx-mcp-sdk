@@ -1,12 +1,14 @@
 #include "cppmcp/client.hpp"
 
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 
 namespace {
 
@@ -71,17 +73,12 @@ int main(int argc, char** argv) {
                 throw std::invalid_argument("unknown option: " + std::string(argument));
             }
         }
-        (void)duration_ms;
         if (options.url.empty()) {
             throw std::invalid_argument("--url is required");
         }
         if (!token.empty()) {
             options.auth_provider = std::make_shared<cppmcp::StaticBearerProvider>(token);
         }
-        if (listen) {
-            throw std::runtime_error("--listen is not implemented yet");
-        }
-
         cppmcp::Client client;
         client.connect_http(std::move(options));
         std::cout << "MODE " << client.http_mode() << '\n';
@@ -101,6 +98,19 @@ int main(int argc, char** argv) {
         const auto add_result = client.call_tool(
             "add", nlohmann::json{{"a", 1}, {"b", 2}});
         std::cout << "CALL add -> " << result_text(add_result) << '\n';
+        if (listen) {
+            cppmcp::transport::ListenCallbacks callbacks;
+            callbacks.on_stream_lost = [] { std::cout << "STREAM_LOST\n"; };
+            callbacks.on_reconnected = [] { std::cout << "RECONNECTED\n"; };
+            auto handle = client.listen(
+                nlohmann::json{{"toolsListChanged", true}},
+                [](const cppmcp::core::Notification& notification) {
+                    std::cout << "NOTIFY " << notification.method << '\n';
+                },
+                std::move(callbacks));
+            std::this_thread::sleep_for(std::chrono::milliseconds(duration_ms));
+            handle->close();
+        }
         client.close();
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

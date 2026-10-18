@@ -6,10 +6,14 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <charconv>
+#include <condition_variable>
+#include <cmath>
 #include <limits>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -108,6 +112,100 @@ llhttp_settings_t response_settings() {
     settings.on_header_value = on_header_value;
     settings.on_body = on_body;
     settings.on_message_complete = on_message_complete;
+    return settings;
+}
+
+struct StreamingResponse {
+    int status = 0;
+    transport::Headers headers;
+    bool header_field_open = false;
+    bool headers_complete = false;
+    bool message_complete = false;
+    transport::SseParser parser;
+    std::function<void(const transport::SseEvent&)> event_callback;
+    std::function<void(const StreamingResponse&)> headers_callback;
+    std::string callback_error;
+
+    StreamingResponse(std::size_t limit,
+                      std::function<void(const transport::SseEvent&)> callback,
+                      std::function<void(const StreamingResponse&)> on_headers)
+        : parser(limit), event_callback(std::move(callback)),
+          headers_callback(std::move(on_headers)) {}
+};
+
+StreamingResponse& stream_response_state(llhttp_t* parser) {
+    return *static_cast<StreamingResponse*>(parser->data);
+}
+
+int on_stream_status(llhttp_t* parser, const char*, std::size_t) {
+    stream_response_state(parser).status = static_cast<int>(parser->status_code);
+    return 0;
+}
+
+int on_stream_header_field(llhttp_t* parser, const char* data, std::size_t length) {
+    auto& response = stream_response_state(parser);
+    if (response.headers.empty() || !response.header_field_open) {
+        response.headers.emplace_back();
+    }
+    response.headers.back().first.append(data, length);
+    response.header_field_open = true;
+    return 0;
+}
+
+int on_stream_header_field_complete(llhttp_t* parser) {
+    stream_response_state(parser).header_field_open = false;
+    return 0;
+}
+
+int on_stream_header_value(llhttp_t* parser, const char* data, std::size_t length) {
+    auto& response = stream_response_state(parser);
+    if (response.headers.empty()) {
+        response.headers.emplace_back();
+    }
+    response.headers.back().second.append(data, length);
+    return 0;
+}
+
+int on_stream_headers_complete(llhttp_t* parser) {
+    auto& response = stream_response_state(parser);
+    response.headers_complete = true;
+    try {
+        response.headers_callback(response);
+    } catch (const std::exception& error) {
+        response.callback_error = error.what();
+        return HPE_USER;
+    }
+    return 0;
+}
+
+int on_stream_body(llhttp_t* parser, const char* data, std::size_t length) {
+    auto& response = stream_response_state(parser);
+    try {
+        for (const auto& event : response.parser.feed(std::string_view(data, length))) {
+            response.event_callback(event);
+        }
+    } catch (const std::exception& error) {
+        response.callback_error = error.what();
+        return HPE_USER;
+    }
+    return 0;
+}
+
+int on_stream_message_complete(llhttp_t* parser) {
+    stream_response_state(parser).message_complete = true;
+    return 0;
+}
+
+llhttp_settings_t streaming_response_settings() {
+    llhttp_settings_t settings;
+    llhttp_settings_init(&settings);
+    settings.on_status = on_stream_status;
+    settings.on_header_field = on_stream_header_field;
+    settings.on_header_field_complete = on_stream_header_field_complete;
+    settings.on_header_value = on_stream_header_value;
+    settings.on_headers_complete = on_stream_headers_complete;
+    settings.on_body = on_stream_body;
+    settings.on_message_complete = on_stream_message_complete;
     return settings;
 }
 
@@ -684,6 +782,423 @@ struct HttpClientTransport::Impl {
     std::map<std::string, core::Json> tool_schemas;
 };
 
+struct ListenHandle::Impl {
+    Impl(HttpClientOptions client_options, Url endpoint, bool modern_mode,
+         std::string legacy_session_id, core::Json requested_filter,
+         std::function<void(const core::Notification&)> notify_callback,
+         ListenCallbacks listen_callbacks, ListenOptions reconnect_options)
+        : options(std::move(client_options)), url(std::move(endpoint)),
+          modern(modern_mode), session_id(std::move(legacy_session_id)),
+          filter(std::move(requested_filter)), callback(std::move(notify_callback)),
+          callbacks(std::move(listen_callbacks)), reconnect(std::move(reconnect_options)) {}
+
+    HttpClientOptions options;
+    Url url;
+    bool modern;
+    std::string session_id;
+    core::Json filter;
+    std::function<void(const core::Notification&)> callback;
+    ListenCallbacks callbacks;
+    ListenOptions reconnect;
+    std::mutex startup_mutex;
+    std::condition_variable startup_condition;
+    bool startup_ready = false;
+    std::string startup_error;
+    std::mutex active_mutex;
+    std::shared_ptr<asio::io_context> active_context;
+    std::shared_ptr<asio::ip::tcp::socket> active_socket;
+    std::shared_ptr<asio::ip::tcp::resolver> active_resolver;
+    std::mutex wait_mutex;
+    std::condition_variable_any wait_condition;
+    std::jthread worker;
+    std::atomic<bool> stop_requested{false};
+    std::int64_t next_request_id = 1;
+    std::string last_event_id;
+    std::optional<std::chrono::milliseconds> server_retry;
+
+    void start() {
+        worker = std::jthread([this](std::stop_token stop) { run(stop); });
+    }
+
+    void close() {
+        stop_requested.store(true, std::memory_order_release);
+        if (worker.joinable()) {
+            worker.request_stop();
+        }
+        wait_condition.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(active_mutex);
+            if (active_resolver) {
+                active_resolver->cancel();
+            }
+            if (active_socket) {
+                asio::error_code ignored;
+                active_socket->cancel(ignored);
+                active_socket->close(ignored);
+            }
+        }
+        if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) {
+            worker.join();
+        }
+    }
+
+    void signal_ready(bool reconnected) {
+        {
+            std::lock_guard<std::mutex> lock(startup_mutex);
+            startup_ready = true;
+        }
+        startup_condition.notify_all();
+        if (reconnected && callbacks.on_reconnected) {
+            callbacks.on_reconnected();
+        }
+    }
+
+    void signal_startup_error(std::string error) {
+        {
+            std::lock_guard<std::mutex> lock(startup_mutex);
+            if (!startup_ready && startup_error.empty()) {
+                startup_error = std::move(error);
+            }
+        }
+        startup_condition.notify_all();
+    }
+
+    std::chrono::milliseconds backoff_delay(std::size_t attempt) {
+        const auto exponent = std::min<std::size_t>(attempt, 30);
+        const auto scaled = static_cast<long double>(reconnect.backoff_base.count()) *
+                            static_cast<long double>(std::uint64_t{1} << exponent);
+        const auto bounded = std::min<long double>(
+            scaled, static_cast<long double>(reconnect.backoff_cap.count()));
+        std::random_device device;
+        std::mt19937 generator(device());
+        std::uniform_real_distribution<double> jitter(
+            -reconnect.jitter_fraction, reconnect.jitter_fraction);
+        const auto adjusted = std::max<long double>(
+            0, bounded * (1 + static_cast<long double>(jitter(generator))));
+        return std::chrono::milliseconds(static_cast<std::chrono::milliseconds::rep>(adjusted));
+    }
+
+    void wait_before_reconnect(std::stop_token stop, std::chrono::milliseconds delay) {
+        std::unique_lock<std::mutex> lock(wait_mutex);
+        wait_condition.wait_for(lock, stop, delay, [] { return false; });
+    }
+
+    void run(std::stop_token stop) {
+        bool has_connected = false;
+        std::size_t reconnect_attempts = 0;
+        while (!stop.stop_requested() &&
+               !stop_requested.load(std::memory_order_acquire)) {
+            bool graceful = false;
+            try {
+                graceful = run_stream(stop, has_connected);
+                if (stop.stop_requested() || stop_requested.load(std::memory_order_acquire) ||
+                    graceful) {
+                    break;
+                }
+                throw std::runtime_error("SSE stream ended unexpectedly");
+            } catch (const std::exception& error) {
+                if (stop.stop_requested() ||
+                    stop_requested.load(std::memory_order_acquire)) {
+                    break;
+                }
+                if (!has_connected) {
+                    signal_startup_error(error.what());
+                    break;
+                }
+                if (callbacks.on_stream_lost) {
+                    callbacks.on_stream_lost();
+                }
+            }
+
+            ++reconnect_attempts;
+            if (reconnect.max_attempts != 0 &&
+                reconnect_attempts > reconnect.max_attempts) {
+                break;
+            }
+            wait_before_reconnect(stop, server_retry.value_or(backoff_delay(reconnect_attempts - 1)));
+        }
+        if (!has_connected && !stop.stop_requested() &&
+            !stop_requested.load(std::memory_order_acquire)) {
+            signal_startup_error("SSE listener stopped before opening a stream");
+        }
+    }
+
+    void connect_stream(std::stop_token stop, const std::shared_ptr<asio::io_context>& context,
+                       const std::shared_ptr<asio::ip::tcp::resolver>& resolver,
+                       const std::shared_ptr<asio::ip::tcp::socket>& socket) {
+        asio::steady_timer timer(*context);
+        timer.expires_after(options.connect_timeout);
+        bool connected = false;
+        bool timed_out = false;
+        std::string error_message;
+        timer.async_wait([&](const asio::error_code& error) {
+            if (!error) {
+                timed_out = true;
+                resolver->cancel();
+                asio::error_code ignored;
+                socket->cancel(ignored);
+            }
+        });
+        resolver->async_resolve(url.host, url.port,
+                                [&, resolver, socket](const asio::error_code& error,
+                                      const asio::ip::tcp::resolver::results_type& endpoints) {
+            if (error) {
+                error_message = error.message();
+                timer.cancel();
+                return;
+            }
+            asio::async_connect(*socket, endpoints,
+                                [&, socket](const asio::error_code& connect_error,
+                                            const asio::ip::tcp::endpoint&) {
+                if (connect_error) {
+                    error_message = connect_error.message();
+                } else {
+                    connected = true;
+                }
+                timer.cancel();
+            });
+        });
+        context->run();
+        if (stop.stop_requested() || stop_requested.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (timed_out) {
+            throw std::runtime_error("SSE connection timed out");
+        }
+        if (!connected) {
+            throw std::runtime_error("SSE connection failed: " + error_message);
+        }
+        socket->non_blocking(true);
+    }
+
+    bool run_stream(std::stop_token stop, bool& has_connected) {
+        auto context = std::make_shared<asio::io_context>();
+        auto resolver = std::make_shared<asio::ip::tcp::resolver>(*context);
+        auto socket = std::make_shared<asio::ip::tcp::socket>(*context);
+        {
+            std::lock_guard<std::mutex> lock(active_mutex);
+            active_context = context;
+            active_resolver = resolver;
+            active_socket = socket;
+        }
+        connect_stream(stop, context, resolver, socket);
+        if (stop.stop_requested() || stop_requested.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        core::Json request_id;
+        std::string request_text;
+        transport::Headers headers;
+        headers.emplace_back("Host", url.authority);
+        headers.emplace_back("Accept", modern ? "application/json, text/event-stream"
+                                               : "text/event-stream");
+        headers.emplace_back("Connection", "keep-alive");
+        if (options.auth_provider) {
+            options.auth_provider->apply(headers);
+        }
+        headers.erase(std::remove_if(headers.begin(), headers.end(), [](const auto& header) {
+            const auto key = lower(header.first);
+            return key == "host" || key == "accept" || key == "connection" ||
+                   key == "content-length" || key == "content-type" ||
+                   key == "mcp-protocol-version" || key == "mcp-method" ||
+                   key == "mcp-session-id" || key.starts_with("mcp-param-") ||
+                   key == "mcp-name";
+        }), headers.end());
+        headers.emplace_back("Host", url.authority);
+        headers.emplace_back("Connection", "keep-alive");
+        std::string body;
+        if (modern) {
+            request_id = next_request_id++;
+            const core::Request request{
+                request_id.get<std::int64_t>(),
+                "subscriptions/listen",
+                {{"_meta", modern_meta("cppmcp-client", "0.1.0")},
+                 {"notifications", filter}},
+            };
+            body = core::serialize_message(request);
+            headers.emplace_back("Content-Type", "application/json");
+            headers.emplace_back("Accept", "application/json, text/event-stream");
+            headers.emplace_back("MCP-Protocol-Version", "2026-07-28");
+            headers.emplace_back("Mcp-Method", "subscriptions/listen");
+            request_text = "POST " + url.target + " HTTP/1.1\r\n";
+        } else {
+            headers.emplace_back("Accept", "text/event-stream");
+            headers.emplace_back("Mcp-Session-Id", session_id);
+            headers.emplace_back("MCP-Protocol-Version", "2025-11-25");
+            if (!last_event_id.empty()) {
+                headers.emplace_back("Last-Event-ID", last_event_id);
+            }
+            request_text = "GET " + url.target + " HTTP/1.1\r\n";
+        }
+        for (const auto& [key, value] : headers) {
+            request_text += key + ": " + value + "\r\n";
+        }
+        if (modern) {
+            request_text += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+        }
+        request_text += "\r\n";
+        request_text += body;
+
+        const auto deadline = std::chrono::steady_clock::now() + options.request_timeout;
+        std::size_t written = 0;
+        while (written < request_text.size() && !stop.stop_requested() &&
+               !stop_requested.load(std::memory_order_acquire)) {
+            asio::error_code error;
+            written += socket->write_some(
+                asio::buffer(request_text.data() + written, request_text.size() - written),
+                error);
+            if (!error) {
+                continue;
+            }
+            if (error != asio::error::would_block && error != asio::error::try_again) {
+                throw std::runtime_error("SSE request write failed: " + error.message());
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw std::runtime_error("SSE request timed out");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        bool acknowledged = false;
+        bool graceful = false;
+        bool connected_this_attempt = false;
+        auto mark_connected = [&] {
+            const bool reconnected = has_connected;
+            has_connected = true;
+            connected_this_attempt = true;
+            signal_ready(reconnected);
+        };
+        auto process_event = [&](const transport::SseEvent& event) {
+            if (!event.last_event_id.empty()) {
+                last_event_id = event.last_event_id;
+            }
+            if (event.retry) {
+                server_retry = event.retry;
+            }
+            const auto parsed = core::parse_message(event.data);
+            const auto* message = std::get_if<core::Message>(&parsed);
+            if (message == nullptr) {
+                throw std::runtime_error("SSE event did not contain a valid JSON-RPC message");
+            }
+            if (modern) {
+                if (!acknowledged) {
+                    const auto* ack = std::get_if<core::Notification>(message);
+                    if (ack == nullptr ||
+                        ack->method != "notifications/subscriptions/acknowledged") {
+                        throw std::runtime_error(
+                            "listen stream did not begin with its acknowledgement");
+                    }
+                    const auto meta = ack->params.value("_meta", core::Json::object());
+                    if (meta.value("io.modelcontextprotocol/subscriptionId", core::Json{}) !=
+                        request_id) {
+                        throw std::runtime_error("listen acknowledgement has the wrong subscription id");
+                    }
+                    acknowledged = true;
+                    mark_connected();
+                    return;
+                }
+                if (const auto* result = std::get_if<core::ResultResponse>(message)) {
+                    graceful = result->result.value("resultType", std::string{}) == "complete";
+                    return;
+                }
+            }
+            if (const auto* notification = std::get_if<core::Notification>(message)) {
+                if (callback) {
+                    callback(*notification);
+                }
+            } else if (const auto* request = std::get_if<core::Request>(message)) {
+                if (callbacks.on_server_request) {
+                    callbacks.on_server_request(*request);
+                }
+            } else {
+                throw std::runtime_error("unexpected JSON-RPC response on a notification stream");
+            }
+        };
+        auto validate_headers = [&](const StreamingResponse& response) {
+            if (response.status == 401 || response.status == 403) {
+                std::vector<std::string> challenges;
+                for (const auto& [key, value] : response.headers) {
+                    if (lower(key) == "www-authenticate") {
+                        challenges.push_back(value);
+                    }
+                }
+                const auto challenge = challenge_for(challenges);
+                if (options.auth_provider) {
+                    (void)options.auth_provider->on_challenge(challenge);
+                }
+                if (response.status == 401) {
+                    throw AuthRequired(challenge);
+                }
+                throw InsufficientScope(challenge);
+            }
+            if (response.status != 200) {
+                throw HttpStatusError(response.status);
+            }
+            const auto content_type = header_value(response.headers, "Content-Type");
+            if (!content_type ||
+                lower(*content_type).find("text/event-stream") == std::string::npos) {
+                throw std::runtime_error("listen endpoint did not return text/event-stream");
+            }
+            if (!modern) {
+                mark_connected();
+            }
+        };
+        StreamingResponse response(options.max_response_bytes, process_event, validate_headers);
+        auto settings = streaming_response_settings();
+        llhttp_t parser;
+        llhttp_init(&parser, HTTP_RESPONSE, &settings);
+        parser.data = &response;
+        std::array<char, 8192> buffer{};
+        while (!stop.stop_requested() &&
+               !stop_requested.load(std::memory_order_acquire) && !graceful) {
+            asio::error_code error;
+            const auto count = socket->read_some(asio::buffer(buffer), error);
+            if (error == asio::error::would_block || error == asio::error::try_again) {
+                if (!connected_this_attempt &&
+                    std::chrono::steady_clock::now() >= deadline) {
+                    throw std::runtime_error("listen acknowledgement timed out");
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+            if (error) {
+                if (!response.callback_error.empty()) {
+                    throw std::runtime_error(response.callback_error);
+                }
+                if (error == asio::error::eof || error == asio::error::connection_reset) {
+                    return graceful || response.message_complete;
+                }
+                throw std::runtime_error("SSE response read failed: " + error.message());
+            }
+            const auto parsed = llhttp_execute(&parser, buffer.data(), count);
+            if (parsed != HPE_OK && parsed != HPE_PAUSED) {
+                if (!response.callback_error.empty()) {
+                    throw std::runtime_error(response.callback_error);
+                }
+                const auto* reason = llhttp_get_error_reason(&parser);
+                throw std::runtime_error("invalid SSE HTTP response: " +
+                                         std::string(reason == nullptr ? "parse error" : reason));
+            }
+            if (response.message_complete) {
+                return graceful;
+            }
+        }
+        return graceful;
+    }
+};
+
+ListenHandle::ListenHandle(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+ListenHandle::~ListenHandle() {
+    close();
+}
+
+void ListenHandle::close() {
+    if (impl_) {
+        impl_->close();
+    }
+}
+
 HttpClientTransport::HttpClientTransport(HttpClientOptions options)
     : impl_(std::make_unique<Impl>(std::move(options))) {}
 
@@ -825,6 +1340,59 @@ bool HttpClientTransport::is_modern() const noexcept {
     return impl_->modern;
 }
 
+std::shared_ptr<ListenHandle> HttpClientTransport::listen(
+    nlohmann::json filter,
+    std::function<void(const core::Notification&)> callback,
+    ListenCallbacks callbacks, ListenOptions options) {
+    if (!filter.is_object()) {
+        throw std::invalid_argument("listen filter must be a JSON object");
+    }
+    if (!callback) {
+        throw std::invalid_argument("listen notification callback must not be empty");
+    }
+    if (options.backoff_base.count() <= 0 || options.backoff_cap < options.backoff_base ||
+        !std::isfinite(options.jitter_fraction) || options.jitter_fraction < 0 ||
+        options.jitter_fraction > 1) {
+        throw std::invalid_argument("invalid listen reconnect backoff configuration");
+    }
+    HttpClientOptions client_options;
+    Url url;
+    bool modern = false;
+    std::string session_id;
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        if (!impl_->started || impl_->closed) {
+            throw std::runtime_error("HTTP client transport is not connected");
+        }
+        client_options = impl_->options;
+        url = impl_->url;
+        modern = impl_->modern;
+        session_id = impl_->session_id;
+    }
+    auto listener = std::make_unique<ListenHandle::Impl>(
+        std::move(client_options), std::move(url), modern, std::move(session_id),
+        std::move(filter), std::move(callback), std::move(callbacks), std::move(options));
+    listener->start();
+    auto handle = std::shared_ptr<ListenHandle>(new ListenHandle(std::move(listener)));
+    std::unique_lock<std::mutex> lock(handle->impl_->startup_mutex);
+    const bool started = handle->impl_->startup_condition.wait_for(
+        lock, impl_->options.request_timeout, [&] {
+            return handle->impl_->startup_ready || !handle->impl_->startup_error.empty();
+        });
+    if (!started) {
+        lock.unlock();
+        handle->close();
+        throw std::runtime_error("timed out waiting for listen stream acknowledgement");
+    }
+    if (!handle->impl_->startup_error.empty()) {
+        const auto error = handle->impl_->startup_error;
+        lock.unlock();
+        handle->close();
+        throw std::runtime_error(error);
+    }
+    return handle;
+}
+
 }  // namespace transport
 
 void Client::connect_http(HttpClientOptions options) {
@@ -839,6 +1407,28 @@ std::string Client::http_mode() const {
         throw std::runtime_error("client is not connected with HTTP transport");
     }
     return http_transport->is_modern() ? "modern" : "legacy";
+}
+
+std::shared_ptr<transport::ListenHandle> Client::listen(
+    nlohmann::json filter,
+    std::function<void(const core::Notification&)> callback,
+    transport::ListenCallbacks callbacks, transport::ListenOptions options) {
+    if (!connection_) {
+        throw std::runtime_error("client is not connected");
+    }
+    const auto http_transport =
+        std::dynamic_pointer_cast<transport::HttpClientTransport>(transport_);
+    if (!http_transport) {
+        throw std::runtime_error("listen requires the HTTP client transport");
+    }
+    auto handle = http_transport->listen(std::move(filter), std::move(callback),
+                                         std::move(callbacks), std::move(options));
+    listen_closers_.emplace_back([weak_handle = std::weak_ptr<transport::ListenHandle>(handle)] {
+        if (const auto active_handle = weak_handle.lock()) {
+            active_handle->close();
+        }
+    });
+    return handle;
 }
 
 }  // namespace cppmcp

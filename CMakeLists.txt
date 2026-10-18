@@ -53,6 +53,7 @@ set(CPPMCP_SOURCES
 
 set(CPPMCP_SERVER_SOURCES
     src/server.cpp
+    src/subscription_registry.cpp
 )
 
 set(CPPMCP_CLIENT_SOURCES
@@ -269,6 +270,7 @@ if(CPPMCP_BUILD_TESTS)
         tests/cancellation_test.cpp
         tests/sse_parser_test.cpp
         tests/www_auth_test.cpp
+        tests/subscription_registry_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio cppmcp::transport_http)
@@ -304,7 +306,7 @@ if(CPPMCP_BUILD_TESTS)
             session_identity dual_mode_legacy dual_mode_modern dual_mode_header_isolation
             dual_mode_runtime dual_mode_server_compat ttl_cache_scope ttl_server_window
             ttl_probe ttl_freshness expiry_reconnect expiry_cleanup expiry_session_timer
-            expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth)
+            expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth listen)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
 endif()

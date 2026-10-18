@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 #include "cppmcp/core/log.hpp"
+#include "cppmcp/transport/http.hpp"
 
 namespace cppmcp {
 namespace {
@@ -56,7 +57,25 @@ core::Json tool_payload(const ToolDefinition& tool) {
 
 }  // namespace
 
-Server::Server(ServerInfo info) : info_(std::move(info)) {}
+Server::Server(ServerInfo info)
+    : info_(std::move(info)),
+      subscriptions_(std::make_shared<transport::SubscriptionRegistry>()) {}
+
+void Server::notify_tools_list_changed() {
+    subscriptions_->notify_tools_list_changed();
+}
+
+void Server::notify_prompts_list_changed() {
+    subscriptions_->notify_prompts_list_changed();
+}
+
+void Server::notify_resources_list_changed() {
+    subscriptions_->notify_resources_list_changed();
+}
+
+void Server::notify_resource_updated(std::string uri) {
+    subscriptions_->notify_resource_updated(uri);
+}
 
 ToolBuilder::ToolBuilder(ToolDefinition tool) : tool_(std::move(tool)) {}
 
@@ -216,7 +235,7 @@ std::vector<HeaderParamDefinition> Server::tool_header_params(const std::string&
 
 nlohmann::json Server::discover() const {
     return {{"protocolVersions", nlohmann::json::array({"2026-07-28", "2025-11-25"})},
-            {"capabilities", {{"tools", {{"listChanged", false}}}}},
+            {"capabilities", {{"tools", {{"listChanged", true}}}}},
             {"serverInfo", {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
 }
 
@@ -257,7 +276,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     if (method == "initialize") {
         return core::ResultResponse{request.id,
                                     {{"protocolVersion", "2025-11-25"},
-                                     {"capabilities", {{"tools", {{"listChanged", false}}}}},
+                                     {"capabilities", {{"tools", {{"listChanged", true}}}}},
                                      {"serverInfo", {{"name", info_.name},
                                                      {"title", info_.title},
                                                      {"version", info_.version}}}}};

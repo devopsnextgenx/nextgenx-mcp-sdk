@@ -60,6 +60,7 @@ void test_expiry_lifecycle();
 void test_expiry_guard();
 void test_sse_parser();
 void test_www_auth();
+void test_listen_registry();
 
 namespace {
 
@@ -154,6 +155,7 @@ int main(int argc, char** argv) {
     run_selected("expiry_guard", test_expiry_guard);
     run_selected("sse_parser", test_sse_parser);
     run_selected("www_auth", test_www_auth);
+    run_selected("listen", test_listen_registry);
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;

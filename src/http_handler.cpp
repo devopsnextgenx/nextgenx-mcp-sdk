@@ -584,7 +584,8 @@ bool has_client_capabilities(const Request& request) {
 }
 
 bool is_supported_method(std::string_view method) {
-    return method == "server/discover" || method == "tools/list" || method == "tools/call";
+    return method == "server/discover" || method == "tools/list" || method == "tools/call" ||
+           method == "subscriptions/listen";
 }
 
 void send_response(IHttpExchange& exchange, const HttpHandlerOptions& options,
@@ -766,10 +767,50 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                                                "Mcp-Session-Id and legacy MCP-Protocol-Version are required for GET"));
             return;
         }
+        {
+            std::lock_guard<std::mutex> lock(legacy_session_mutex());
+            const auto found = legacy_sessions().find(*session_id);
+            if (found == legacy_sessions().end() || !found->second.active) {
+                respond_error(*exchange, 404,
+                              core::protocol_error(ErrorCode::invalid_request,
+                                                   "Legacy session not found"));
+                return;
+            }
+            found->second.last_seen = std::chrono::steady_clock::now();
+        }
+        const auto registry = server_.subscriptions_;
+        const auto stream_token = registry->open_legacy_stream(*session_id);
+        if (stream_token.stream_id == 0) {
+            respond_error(*exchange, 404,
+                          core::protocol_error(ErrorCode::invalid_request,
+                                               "Legacy session not found"));
+            return;
+        }
         auto& sse = exchange->begin_sse(200, {{"Content-Type", "text/event-stream"},
                                               {"Cache-Control", "no-cache"},
                                               {"X-Accel-Buffering", "no"}});
         sse.write_event(R"({"jsonrpc":"2.0","method":"ping","params":{}})");
+        const std::weak_ptr<SubscriptionRegistry> weak_registry = registry;
+        exchange->on_disconnect([weak_registry, stream_token] {
+            if (const auto active_registry = weak_registry.lock()) {
+                active_registry->close_legacy_stream(stream_token);
+            }
+        });
+        for (;;) {
+            Json event;
+            const auto status = registry->next_legacy_stream(
+                stream_token, event, std::chrono::seconds(15));
+            if (status == SubscriptionReadStatus::event) {
+                sse.write_event(event.dump());
+                continue;
+            }
+            if (status == SubscriptionReadStatus::timeout) {
+                sse.write_comment("keep-alive");
+                continue;
+            }
+            break;
+        }
+        registry->close_legacy_stream(stream_token);
         sse.close();
         return;
     }
@@ -788,6 +829,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
             legacy_sessions().erase(*session_id);
         }
+        server_.subscriptions_->remove_legacy_session(*session_id);
         exchange->respond(200, {{"Content-Type", "application/json"}}, "{}\n");
         return;
     }
@@ -854,12 +896,13 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         if (rpc_request.method == "initialize") {
             const std::string sid = generate_session_id();
             Json result = { {"protocolVersion", "2025-11-25"},
-                            {"capabilities", {{"tools", {{"listChanged", false}}}}},
+                            {"capabilities", {{"tools", {{"listChanged", true}}}}},
                             {"serverInfo", {{"name", "cppmcp"}, {"title", "cppmcp"}, {"version", "0.1.0"}}} };
             {
                 std::lock_guard<std::mutex> lock(legacy_session_mutex());
                 legacy_sessions()[sid] = LegacySession{sid, "2025-11-25"};
             }
+            server_.subscriptions_->register_legacy_session(sid, true);
             const auto response = core::ResultResponse{rpc_request.id, std::move(result)};
             exchange->respond(200, {{"Mcp-Session-Id", sid}, {"Content-Type", "application/json"}},
                              core::serialize_message(response));
@@ -939,6 +982,114 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                       core::protocol_error(ErrorCode::invalid_request,
                                            "Request metadata must include client capabilities"),
                       rpc_request.id);
+        return;
+    }
+    if (rpc_request.method == "subscriptions/listen") {
+        if (!accept_sse) {
+            exchange->respond(406, {{"Content-Type", "application/json"}}, "");
+            return;
+        }
+        const auto notifications = rpc_request.params.find("notifications");
+        if (notifications == rpc_request.params.end() || !notifications->is_object()) {
+            respond_error(*exchange, 400,
+                          core::protocol_error(ErrorCode::invalid_params,
+                                               "subscriptions/listen requires a notifications filter"),
+                          rpc_request.id);
+            return;
+        }
+        for (const auto* field : {"toolsListChanged", "promptsListChanged",
+                                  "resourcesListChanged"}) {
+            if (notifications->contains(field) && !(*notifications)[field].is_boolean()) {
+                respond_error(*exchange, 400,
+                              core::protocol_error(ErrorCode::invalid_params,
+                                                   std::string(field) + " must be a boolean"),
+                              rpc_request.id);
+                return;
+            }
+        }
+        if (notifications->contains("resourceSubscriptions")) {
+            const auto& resources = (*notifications)["resourceSubscriptions"];
+            if (!resources.is_array() ||
+                !std::all_of(resources.begin(), resources.end(),
+                             [](const auto& uri) { return uri.is_string(); })) {
+                respond_error(*exchange, 400,
+                              core::protocol_error(
+                                  ErrorCode::invalid_params,
+                                  "resourceSubscriptions must be an array of strings"),
+                              rpc_request.id);
+                return;
+            }
+        }
+
+        const bool tools_requested =
+            notifications->value("toolsListChanged", false);
+        SubscriptionFilter filter;
+        filter.tools_list_changed = tools_requested;
+        core::Json accepted = core::Json::object();
+        if (tools_requested) {
+            accepted["toolsListChanged"] = true;
+        }
+
+        const auto registry = server_.subscriptions_;
+        std::uint64_t subscriber_id = 0;
+        try {
+            subscriber_id = registry->subscribe(
+                request.peer.remote_address.empty() ? "unknown" : request.peer.remote_address,
+                std::visit([](const auto& id) -> core::Json { return id; }, rpc_request.id),
+                std::move(filter));
+        } catch (const SubscriptionLimitError& error) {
+            respond_error(*exchange, 429,
+                          core::protocol_error(ErrorCode::invalid_request, error.what()),
+                          rpc_request.id);
+            return;
+        }
+
+        auto& stream = exchange->begin_sse(
+            200, {{"Content-Type", "text/event-stream"},
+                  {"Cache-Control", "no-cache"},
+                  {"X-Accel-Buffering", "no"}});
+        const auto request_id =
+            std::visit([](const auto& id) -> core::Json { return id; }, rpc_request.id);
+        const core::Json acknowledgement{
+            {"jsonrpc", "2.0"},
+            {"method", "notifications/subscriptions/acknowledged"},
+            {"params", {{"_meta", {{"io.modelcontextprotocol/subscriptionId", request_id}}},
+                        {"notifications", accepted}}},
+        };
+        const std::weak_ptr<SubscriptionRegistry> weak_registry = registry;
+        exchange->on_disconnect([weak_registry, subscriber_id] {
+            if (const auto active_registry = weak_registry.lock()) {
+                active_registry->unsubscribe(subscriber_id);
+            }
+        });
+        stream.write_event(acknowledgement.dump());
+
+        for (;;) {
+            core::Json event;
+            const auto status = registry->next(subscriber_id, event,
+                                               std::chrono::seconds(15));
+            if (status == SubscriptionReadStatus::event) {
+                stream.write_event(event.dump());
+                continue;
+            }
+            if (status == SubscriptionReadStatus::timeout) {
+                stream.write_comment("keep-alive");
+                continue;
+            }
+            if (status == SubscriptionReadStatus::shutdown) {
+                const core::Json completion{
+                    {"jsonrpc", "2.0"},
+                    {"id", request_id},
+                    {"result", {{"resultType", "complete"},
+                                {"_meta", {{"io.modelcontextprotocol/subscriptionId",
+                                            request_id}}}}},
+                };
+                stream.write_event(completion.dump());
+            }
+            break;
+        }
+        registry->unsubscribe(subscriber_id);
+        stream.close();
         return;
     }
 

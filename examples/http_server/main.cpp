@@ -8,6 +8,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <stop_token>
 #include <thread>
 
 namespace {
@@ -194,7 +195,29 @@ int main(int argc, char** argv) {
 
         cppmcp::Server server({"cppmcp-http-server", "cppmcp HTTP server", "0.1.0"});
         add_tools(server);
+        std::jthread notifier;
+        if (options.notify_interval.count() > 0) {
+            notifier = std::jthread([&server, interval = options.notify_interval](
+                                        std::stop_token stop) {
+                auto next_notification = std::chrono::steady_clock::now() + interval;
+                while (!stop.stop_requested()) {
+                    while (!stop.stop_requested() &&
+                           std::chrono::steady_clock::now() < next_notification) {
+                        const auto remaining = next_notification -
+                                               std::chrono::steady_clock::now();
+                        std::this_thread::sleep_for(std::min(
+                            std::chrono::milliseconds(50),
+                            std::chrono::duration_cast<std::chrono::milliseconds>(remaining)));
+                    }
+                    if (!stop.stop_requested()) {
+                        server.notify_tools_list_changed();
+                        next_notification = std::chrono::steady_clock::now() + interval;
+                    }
+                }
+            });
+        }
         server.run_http(options);
+        notifier.request_stop();
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
         std::cerr << "http_server: " << error.what() << '\n';

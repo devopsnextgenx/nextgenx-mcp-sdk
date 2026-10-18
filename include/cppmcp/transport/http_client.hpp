@@ -1,10 +1,12 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -86,6 +88,34 @@ private:
 
 namespace cppmcp::transport {
 
+struct ListenCallbacks {
+    std::function<void()> on_stream_lost;
+    std::function<void()> on_reconnected;
+    std::function<void(const core::Request&)> on_server_request;
+};
+
+struct ListenOptions {
+    std::chrono::milliseconds backoff_base{200};
+    std::chrono::milliseconds backoff_cap{5000};
+    std::size_t max_attempts = 0;
+    double jitter_fraction = 0.2;
+};
+
+class ListenHandle {
+public:
+    ~ListenHandle();
+    ListenHandle(const ListenHandle&) = delete;
+    ListenHandle& operator=(const ListenHandle&) = delete;
+    void close();
+
+private:
+    struct Impl;
+    explicit ListenHandle(std::unique_ptr<Impl> impl);
+    std::unique_ptr<Impl> impl_;
+
+    friend class HttpClientTransport;
+};
+
 class HttpClientTransport final : public core::ITransport {
 public:
     explicit HttpClientTransport(HttpClientOptions options);
@@ -97,6 +127,10 @@ public:
     core::CancellationStrategy cancellation_strategy() const noexcept override;
     void cancel_request(const core::RequestId& request_id) override;
     [[nodiscard]] bool is_modern() const noexcept;
+    [[nodiscard]] std::shared_ptr<ListenHandle> listen(
+        nlohmann::json filter,
+        std::function<void(const core::Notification&)> callback,
+        ListenCallbacks callbacks = {}, ListenOptions options = {});
 
 private:
     struct Impl;
