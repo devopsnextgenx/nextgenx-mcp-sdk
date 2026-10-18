@@ -1,1 +1,0 @@
-/usr/bin/c++ -fPIC -Wall -Wextra -Wpedantic -Werror -shared -Wl,--dependency-file=CMakeFiles/cppmcp_core_shared.dir/link.d -Wl,-soname,libcppmcp_core_shared.so -o libcppmcp_core_shared.so CMakeFiles/cppmcp_core_shared.dir/src/json_rpc.cpp.o CMakeFiles/cppmcp_core_shared.dir/src/version.cpp.o CMakeFiles/cppmcp_core_shared.dir/src/connection.cpp.o

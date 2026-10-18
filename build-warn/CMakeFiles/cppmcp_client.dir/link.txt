@@ -1,2 +1,0 @@
-/usr/bin/ar qc libcppmcp_client.a CMakeFiles/cppmcp_client.dir/src/client.cpp.o
-/usr/bin/ranlib libcppmcp_client.a

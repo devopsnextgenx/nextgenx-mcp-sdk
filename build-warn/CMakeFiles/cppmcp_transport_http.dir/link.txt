@@ -1,2 +1,0 @@
-/usr/bin/ar qc libcppmcp_transport_http.a CMakeFiles/cppmcp_transport_http.dir/src/http_handler.cpp.o
-/usr/bin/ranlib libcppmcp_transport_http.a

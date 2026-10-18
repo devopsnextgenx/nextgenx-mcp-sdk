@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/kira/git/devopsnextgenx/nextgenx-mcp-sdk/build-warn/cmake_install.cmake",
-		"/home/kira/git/devopsnextgenx/nextgenx-mcp-sdk/build-warn/_deps/nlohmann_json-build/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
