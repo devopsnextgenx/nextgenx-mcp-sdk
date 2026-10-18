@@ -32,7 +32,7 @@ gate's bounded `npx` and CLI invocations produced these results:
 | Inspector CLI -> our dual server | `npx -y @modelcontextprotocol/inspector --cli "$URL" --transport http --method tools/list` | Exit 0; gate reported `PASS: Inspector CLI -> our dual server`. |
 | Our client -> TypeScript `server-everything` | `PORT=<free port> npx -y @modelcontextprotocol/server-everything streamableHttp`; `build/cppmcp_http_client --url "http://127.0.0.1:$PORT/mcp" --mode auto` | Exit 0; negotiated legacy and listed the reference server's tools. This server does not expose `add`, so the example client lists tools without attempting that optional example-only call. |
 | TypeScript SDK client -> our dual server | A Node client loaded `Client` and `StreamableHTTPClientTransport` from `@modelcontextprotocol/sdk` via `npx -y -p @modelcontextprotocol/sdk`; it connected to a dynamically allocated local dual server and called `listTools()`. | Exit 0; `TS_SDK_CONNECTED tools=5`. No npm dependency was added to the repository. |
-| Claude Code -> our dual server | Gate configured `cppmcp-verify` with `claude mcp add --transport http cppmcp-verify "$URL"` and checked `claude mcp list`. | `cppmcp-verify: http://127.0.0.1:47509/mcp (HTTP) - ✔ Connected`; gate passed. |
+| Claude Code -> our dual server | Gate configured `cppmcp-verify` with `claude mcp add --transport http cppmcp-verify "$URL"` and checked `claude mcp list`. | `cppmcp-verify: http://127.0.0.1:33959/mcp (HTTP) - ✔ Connected`; gate passed. |
 
 The final gate summary was `RESULT: 63 passed, 0 failed, 0 warnings`. Both
 ASan+UBSan and TSan completed with zero findings. The initial interop attempt

@@ -45,10 +45,10 @@ expected incomplete-stream curl status when the server was shut down.
 
 ```text
 85/85 tests passed, 0 tests failed
-Total Test time (real) = 6.70 sec
+Total Test time (real) = 6.71 sec
 
-ASan+UBSan: all 85 tests passed, zero findings
-TSan: all 85 tests passed, zero findings
+ASan+UBSan: all 85 tests passed, zero findings (11.23 sec)
+TSan: all 85 tests passed, zero findings (8.87 sec)
 ```
 
 The 1000-subscriber registry soak, hostname-mismatch, expired-certificate, and
@@ -58,7 +58,11 @@ active Asio socket could previously destroy its context too early, and closing
 the Asio socket concurrently with a blocking read raced. The implementation
 now preserves context lifetime across replacement and shuts down the native
 connection descriptor to wake the read without concurrently mutating the
-Asio socket. The focused test and the full sanitizer suites then passed.
+Asio socket. TSan also exposed the server's shutdown closing accepted Asio
+sockets while workers were reading and stopping the IO context before those
+sockets were released. Server shutdown now signals the native descriptors,
+waits for connection workers to release their sockets, and drains the context
+before destruction. The focused test and the full sanitizer suites then passed.
 
 ## Fuzz smoke tests
 
