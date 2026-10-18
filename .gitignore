@@ -1,5 +1,4 @@
 /build/
 /dist/
 /prompts/
-/build-warn/
-/build-fuzz/
+/build-*/
