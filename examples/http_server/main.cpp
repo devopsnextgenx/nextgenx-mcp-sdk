@@ -105,6 +105,8 @@ int main(int argc, char** argv) {
                 options.port = parse_port(argv[++i]);
             } else if (argument == "--bind" && i + 1 < argc) {
                 options.bind_address = argv[++i];
+            } else if (argument == "--allow-non-loopback") {
+                options.allow_non_loopback = true;
             } else if (argument == "--json-only") {
                 options.handler.response_mode = cppmcp::transport::HttpResponseMode::json_only;
             } else if (argument == "--sse-only") {

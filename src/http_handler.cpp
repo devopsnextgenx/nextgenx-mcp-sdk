@@ -125,6 +125,82 @@ bool origin_allowed(const HttpRequest& request, const std::vector<std::string>& 
     });
 }
 
+std::optional<std::string> normalize_host(std::string_view host_header) {
+    auto host = trim(host_header);
+    if (host.empty() || host.find_first_of(" \t\r\n/@?#") != std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::string_view hostname;
+    std::string_view port;
+    if (host.front() == '[') {
+        const auto close = host.find(']');
+        if (close == std::string_view::npos) {
+            return std::nullopt;
+        }
+        hostname = host.substr(1, close - 1);
+        if (close + 1 < host.size()) {
+            if (host[close + 1] != ':') {
+                return std::nullopt;
+            }
+            port = host.substr(close + 2);
+        }
+    } else {
+        const auto colon = host.find(':');
+        if (colon != std::string_view::npos) {
+            if (host.find(':', colon + 1) != std::string_view::npos) {
+                return std::nullopt;
+            }
+            hostname = host.substr(0, colon);
+            port = host.substr(colon + 1);
+        } else {
+            hostname = host;
+        }
+    }
+    if (hostname.empty()) {
+        return std::nullopt;
+    }
+    if (!port.empty()) {
+        unsigned parsed_port = 0;
+        const auto parsed = std::from_chars(port.data(), port.data() + port.size(), parsed_port);
+        if (parsed.ec != std::errc{} || parsed.ptr != port.data() + port.size() ||
+            parsed_port > 65535) {
+            return std::nullopt;
+        }
+    } else if (host.back() == ':') {
+        return std::nullopt;
+    }
+    return lower_ascii(hostname);
+}
+
+bool host_allowed(const HttpRequest& request, const std::vector<std::string>& allowed_hosts) {
+    const auto hosts = header_values(request.headers, "Host");
+    if (hosts.empty()) {
+        return request.peer.remote_address.empty();
+    }
+    if (hosts.size() != 1) {
+        return false;
+    }
+    const auto normalized = normalize_host(hosts.front());
+    if (!normalized) {
+        return false;
+    }
+    for (const auto& allowed : allowed_hosts) {
+        const auto normalized_allowed = normalize_host(allowed);
+        if (normalized_allowed && *normalized_allowed == *normalized) {
+            return true;
+        }
+    }
+    if (request.peer.remote_address.empty()) {
+        return true;
+    }
+    const auto remote = lower_ascii(request.peer.remote_address);
+    if (remote == "127.0.0.1" || remote == "::1") {
+        return *normalized == "localhost" || *normalized == "127.0.0.1" ||
+               *normalized == "::1";
+    }
+    return *normalized == remote;
+}
+
 double quality(std::string_view parameter) {
     const auto equal = parameter.find('=');
     if (equal == std::string_view::npos || lower_ascii(trim(parameter.substr(0, equal))) != "q") {
@@ -452,6 +528,15 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
     if (!origin_allowed(request, options_.allowed_origins)) {
         respond_error(*exchange, 403,
                       core::protocol_error(ErrorCode::invalid_request, "Origin is not allowed"));
+        return;
+    }
+    if (!host_allowed(request, options_.allowed_hosts)) {
+        respond_error(*exchange, 403,
+                      core::protocol_error(ErrorCode::invalid_request, "Host is not allowed"));
+        return;
+    }
+    if (options_.authenticator && !options_.authenticator(request)) {
+        exchange->respond(401, {{"WWW-Authenticate", "Bearer"}}, "");
         return;
     }
     if (request.method != "POST") {

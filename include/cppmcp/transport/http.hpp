@@ -1,7 +1,9 @@
 #pragma once
 
 #include <functional>
+#include <chrono>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -51,15 +53,22 @@ struct HttpHandlerOptions {
     std::string path = "/mcp";
     HttpResponseMode response_mode = HttpResponseMode::automatic;
     std::vector<std::string> allowed_origins;
+    std::vector<std::string> allowed_hosts;
+    std::function<bool(const HttpRequest&)> authenticator;
 };
 
 struct HttpOptions {
     std::string bind_address = "127.0.0.1";
     unsigned short port = 8000;
     std::string bearer_token;
+    bool allow_non_loopback = false;
     HttpHandlerOptions handler;
+    std::function<std::optional<std::string>(const HttpRequest&)> route;
     std::size_t max_header_bytes = 32 * 1024;
     std::size_t max_body_bytes = 16 * 1024 * 1024;
+    std::chrono::milliseconds header_timeout{5000};
+    std::chrono::milliseconds body_timeout{10000};
+    std::chrono::milliseconds idle_timeout{30000};
 };
 
 class McpHttpHandler {

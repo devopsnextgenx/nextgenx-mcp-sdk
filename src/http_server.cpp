@@ -6,10 +6,12 @@
 #include <asio.hpp>
 #include <llhttp.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cctype>
 #include <exception>
 #include <mutex>
 #include <sstream>
@@ -32,6 +34,11 @@ struct ParseState {
     std::string value;
     bool reading_value = false;
     bool complete = false;
+    bool headers_complete = false;
+    std::size_t header_bytes = 0;
+    std::size_t max_header_bytes = 0;
+    std::size_t max_body_bytes = 0;
+    int rejection_status = 0;
 };
 
 ParseState& parse_state(llhttp_t* parser) {
@@ -48,7 +55,13 @@ void finish_header(ParseState& state) {
 }
 
 int on_url(llhttp_t* parser, const char* data, std::size_t length) {
-    parse_state(parser).request.target.append(data, length);
+    auto& state = parse_state(parser);
+    state.header_bytes += length;
+    if (state.header_bytes > state.max_header_bytes) {
+        state.rejection_status = 431;
+        return HPE_USER;
+    }
+    state.request.target.append(data, length);
     return 0;
 }
 
@@ -57,12 +70,22 @@ int on_header_field(llhttp_t* parser, const char* data, std::size_t length) {
     if (state.reading_value) {
         finish_header(state);
     }
+    state.header_bytes += length;
+    if (state.header_bytes > state.max_header_bytes) {
+        state.rejection_status = 431;
+        return HPE_USER;
+    }
     state.field.append(data, length);
     return 0;
 }
 
 int on_header_value(llhttp_t* parser, const char* data, std::size_t length) {
     auto& state = parse_state(parser);
+    state.header_bytes += length;
+    if (state.header_bytes > state.max_header_bytes) {
+        state.rejection_status = 431;
+        return HPE_USER;
+    }
     state.reading_value = true;
     state.value.append(data, length);
     return 0;
@@ -72,11 +95,23 @@ int on_headers_complete(llhttp_t* parser) {
     auto& state = parse_state(parser);
     finish_header(state);
     state.request.method = llhttp_method_name(static_cast<llhttp_method_t>(parser->method));
+    state.headers_complete = true;
+    if ((parser->flags & F_CONTENT_LENGTH) != 0 &&
+        parser->content_length > state.max_body_bytes) {
+        state.rejection_status = 413;
+        return HPE_USER;
+    }
     return 0;
 }
 
 int on_body(llhttp_t* parser, const char* data, std::size_t length) {
-    parse_state(parser).request.body.append(data, length);
+    auto& state = parse_state(parser);
+    if (length > state.max_body_bytes -
+                     std::min(state.max_body_bytes, state.request.body.size())) {
+        state.rejection_status = 413;
+        return HPE_USER;
+    }
+    state.request.body.append(data, length);
     return 0;
 }
 
@@ -102,6 +137,7 @@ std::string reason_phrase(int status) {
     switch (status) {
         case 200: return "OK";
         case 400: return "Bad Request";
+        case 401: return "Unauthorized";
         case 403: return "Forbidden";
         case 404: return "Not Found";
         case 405: return "Method Not Allowed";
@@ -109,6 +145,8 @@ std::string reason_phrase(int status) {
         case 413: return "Payload Too Large";
         case 415: return "Unsupported Media Type";
         case 500: return "Internal Server Error";
+        case 408: return "Request Timeout";
+        case 431: return "Request Header Fields Too Large";
         default: return "Error";
     }
 }
@@ -249,8 +287,10 @@ void send_bad_request(const std::shared_ptr<Tcp::socket>& socket, int status) {
 }
 
 void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
-                      const McpHttpHandler& handler, const std::string& bearer_token) {
+                      const McpHttpHandler& handler, const HttpOptions& options) {
     ParseState state;
+    state.max_header_bytes = options.max_header_bytes;
+    state.max_body_bytes = options.max_body_bytes;
     asio::error_code endpoint_error;
     const auto endpoint = socket->remote_endpoint(endpoint_error);
     if (!endpoint_error) {
@@ -261,24 +301,47 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
     llhttp_t parser;
     llhttp_init(&parser, HTTP_REQUEST, &settings);
     parser.data = &state;
+    socket->non_blocking(true);
     std::array<char, 8192> buffer{};
     std::string pending;
+    bool request_started = false;
+    auto deadline = std::chrono::steady_clock::now() + options.idle_timeout;
 
     while (socket->is_open()) {
         if (pending.empty()) {
             asio::error_code error;
             const auto count = socket->read_some(asio::buffer(buffer), error);
+            if (error == asio::error::would_block || error == asio::error::try_again) {
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    if (request_started) {
+                        send_bad_request(socket, 408);
+                    }
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
             if (error || count == 0) {
                 break;
+            }
+            if (!request_started) {
+                request_started = true;
+                deadline = std::chrono::steady_clock::now() + options.header_timeout;
             }
             pending.assign(buffer.data(), count);
         }
 
         state.complete = false;
+        const bool headers_were_complete = state.headers_complete;
         const auto parsed = llhttp_execute(&parser, pending.data(), pending.size());
         if (parsed != HPE_OK && parsed != HPE_PAUSED) {
-            send_bad_request(socket, 400);
+            send_bad_request(socket, state.rejection_status != 0
+                                         ? state.rejection_status
+                                         : 400);
             break;
+        }
+        if (!headers_were_complete && state.headers_complete) {
+            deadline = std::chrono::steady_clock::now() + options.body_timeout;
         }
         if (!state.complete) {
             pending.clear();
@@ -293,27 +356,35 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
                                     ? pending.substr(consumed)
                                     : std::string{};
         const bool keep_alive = connection_wants_keep_alive(state, parser);
+        bool route_found = true;
+        if (options.route) {
+            const auto routed_target = options.route(state.request);
+            route_found = routed_target.has_value();
+            if (routed_target) {
+                state.request.target = *routed_target;
+            }
+        }
         auto exchange = std::make_shared<SocketExchange>(socket, std::move(state.request),
                                                           keep_alive);
+        socket->non_blocking(false);
         try {
-            if (!bearer_token.empty()) {
-                std::vector<std::string_view> authorization;
-                for (const auto& [name, value] : exchange->request().headers) {
-                    std::string normalized = name;
-                    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                                   [](unsigned char ch) {
-                                       return static_cast<char>(std::tolower(ch));
-                                   });
-                    if (normalized == "authorization") {
-                        authorization.push_back(value);
-                    }
+            std::vector<std::string_view> authorization;
+            for (const auto& [name, value] : exchange->request().headers) {
+                std::string normalized = name;
+                std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                               [](unsigned char ch) {
+                                   return static_cast<char>(std::tolower(ch));
+                               });
+                if (normalized == "authorization") {
+                    authorization.push_back(value);
                 }
-                if (authorization.size() != 1 ||
-                    authorization.front() != "Bearer " + bearer_token) {
-                    exchange->respond(401, {{"WWW-Authenticate", "Bearer"}}, "");
-                } else {
-                    handler.handle(exchange);
-                }
+            }
+            if (!route_found) {
+                exchange->respond(404, {}, "");
+            } else if (!options.bearer_token.empty() &&
+                       (authorization.size() != 1 ||
+                        authorization.front() != "Bearer " + options.bearer_token)) {
+                exchange->respond(401, {{"WWW-Authenticate", "Bearer"}}, "");
             } else {
                 handler.handle(exchange);
             }
@@ -328,12 +399,18 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
         }
 
         state = ParseState{};
+        state.max_header_bytes = options.max_header_bytes;
+        state.max_body_bytes = options.max_body_bytes;
         if (!endpoint_error) {
             state.request.peer.remote_address = endpoint.address().to_string();
         }
-        llhttp_reset(&parser);
+        llhttp_init(&parser, HTTP_REQUEST, &settings);
         parser.data = &state;
         pending = std::move(remainder);
+        request_started = !pending.empty();
+        deadline = std::chrono::steady_clock::now() +
+                   (request_started ? options.header_timeout : options.idle_timeout);
+        socket->non_blocking(true);
     }
     asio::error_code ignored;
     socket->shutdown(Tcp::socket::shutdown_both, ignored);
@@ -365,10 +442,18 @@ void AsioExecutor::post(std::function<void()> task) {
 }
 
 struct HttpServerHandle::Impl {
-    Impl(Server& server, const HttpOptions& options)
-        : handler(server, options.handler), acceptor(context),
-          bearer_token(options.bearer_token) {
+    Impl(Server& server, const HttpOptions& server_options)
+        : options(server_options), handler(server, options.handler), acceptor(context) {
         const auto address = asio::ip::make_address(options.bind_address);
+        if (!address.is_loopback() && !options.allow_non_loopback) {
+            throw std::invalid_argument(
+                "non-loopback HTTP bind requires allow_non_loopback=true");
+        }
+        if (options.max_header_bytes == 0 || options.max_body_bytes == 0 ||
+            options.header_timeout.count() <= 0 || options.body_timeout.count() <= 0 ||
+            options.idle_timeout.count() <= 0) {
+            throw std::invalid_argument("HTTP limits and timeouts must be positive");
+        }
         Tcp::endpoint endpoint(address, options.port);
         acceptor.open(endpoint.protocol());
         acceptor.set_option(Tcp::acceptor::reuse_address(true));
@@ -394,7 +479,7 @@ struct HttpServerHandle::Impl {
                 }
                 active_sockets.push_back(socket);
                 workers.emplace_back([this, socket] {
-                    serve_connection(socket, handler, bearer_token);
+                    serve_connection(socket, handler, options);
                     std::lock_guard<std::mutex> worker_lock(workers_mutex);
                     active_sockets.erase(
                         std::remove(active_sockets.begin(), active_sockets.end(), socket),
@@ -436,9 +521,9 @@ struct HttpServerHandle::Impl {
     }
 
     asio::io_context context;
+    HttpOptions options;
     McpHttpHandler handler;
     Tcp::acceptor acceptor;
-    std::string bearer_token;
     std::atomic<bool> stopping{false};
     std::thread accept_thread;
     std::mutex workers_mutex;

@@ -68,3 +68,16 @@
 - `Server::start_http` returns a stoppable RAII handle. `Server::run_http`
   blocks until SIGINT or SIGTERM and then shuts down the listener and active
   connections.
+- Request hardening uses bounded header/body sizes and absolute header/body
+  deadlines, plus an idle connection deadline. Non-loopback binds require
+  explicit opt-in; deployments using public hostnames configure
+  `HttpHandlerOptions::allowed_hosts`.
+- HTTP status mapping is explicit: malformed requests and mirrored-header
+  mismatches use 400; authentication uses 401; denied Host/Origin uses 403;
+  unmatched routes use 404; unsupported methods use 405 with `Allow: POST`;
+  unacceptable response formats use 406; read deadlines use 408; oversized
+  bodies use 413; invalid content types use 415; oversized headers use 431;
+  handler exceptions are logged and return 500.
+- The HTTP options expose an authenticator callback and a route callback.
+  Bearer-token validation is an optional built-in authenticator; the custom
+  callback can add application-specific authentication.

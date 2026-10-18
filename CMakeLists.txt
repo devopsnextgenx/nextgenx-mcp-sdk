@@ -218,6 +218,7 @@ if(CPPMCP_BUILD_TESTS)
         tests/schema_contract_test.cpp
         tests/phase2_test.cpp
         tests/http_handler_test.cpp
+        tests/http_server_test.cpp
         tests/cancellation_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
@@ -227,12 +228,16 @@ if(CPPMCP_BUILD_TESTS)
     endif()
     target_compile_features(cppmcp_core_tests PRIVATE cxx_std_20)
     cppmcp_configure_warnings(cppmcp_core_tests)
+    target_include_directories(cppmcp_core_tests SYSTEM PRIVATE
+        ${asio_SOURCE_DIR}/asio/include
+    )
     target_compile_definitions(cppmcp_core_tests PRIVATE
         CPPMCP_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schema/2026-07-28/schema.json"
     )
     foreach(test_name IN ITEMS
             json_rpc versions schema_contract phase2_memory phase2_stdio
-            http_handler cancellation)
+            http_handler cancellation http_server_methods http_server_host_origin
+            http_server_smuggling http_server_slowloris http_server_auth_route_bind)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
 endif()

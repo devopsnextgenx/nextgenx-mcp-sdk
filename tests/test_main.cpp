@@ -13,6 +13,11 @@ void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
 void test_http_handler();
 void test_cancellation_strategy();
+void test_http_server_methods();
+void test_http_server_host_origin();
+void test_http_server_smuggling();
+void test_http_server_slowloris();
+void test_http_server_auth_route_bind();
 
 namespace {
 
@@ -58,6 +63,11 @@ int main(int argc, char** argv) {
     run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
     run_selected("http_handler", test_http_handler);
     run_selected("cancellation", test_cancellation_strategy);
+    run_selected("http_server_methods", test_http_server_methods);
+    run_selected("http_server_host_origin", test_http_server_host_origin);
+    run_selected("http_server_smuggling", test_http_server_smuggling);
+    run_selected("http_server_slowloris", test_http_server_slowloris);
+    run_selected("http_server_auth_route_bind", test_http_server_auth_route_bind);
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;
