@@ -1,6 +1,7 @@
 #include "cppmcp/server.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <exception>
 #include <set>
 #include <stdexcept>
@@ -17,6 +18,14 @@ bool valid_header_param_name(std::string_view name) {
                (ch >= 'a' && ch <= 'z') ||
                punctuation.find(static_cast<char>(ch)) != std::string_view::npos;
     });
+}
+
+std::string lowercase_ascii(std::string_view value) {
+    std::string result(value);
+    std::transform(result.begin(), result.end(), result.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return result;
 }
 
 core::Json tool_payload(const ToolDefinition& tool) {
@@ -88,20 +97,23 @@ void ToolBuilder::validate_and_annotate() {
         throw std::invalid_argument("inputSchema.required must be an array");
     }
     std::set<std::string> names;
-    for (const auto& header_param : header_params_) {
+    for (auto& header_param : header_params_) {
         if (!valid_header_param_name(header_param.name) ||
-            !names.insert(header_param.name).second) {
+            !names.insert(lowercase_ascii(header_param.name)).second) {
             throw std::invalid_argument("header parameter names must be unique HTTP tokens");
         }
         auto property = schema["properties"].find(header_param.name);
         if (property == schema["properties"].end() || !property->is_object() ||
             !property->contains("type") || !(*property)["type"].is_string() ||
-            (*property)["type"].get<std::string>() != "string" ||
+            ((*property)["type"].get<std::string>() != "string" &&
+             (*property)["type"].get<std::string>() != "integer" &&
+             (*property)["type"].get<std::string>() != "boolean") ||
             property->contains("x-mcp-header")) {
             throw std::invalid_argument(
-                "header parameters must name an unannotated string inputSchema property");
+                "header parameters must name an unannotated string, integer, or boolean property");
         }
-        (*property)["x-mcp-header"] = "Mcp-Param-" + header_param.name;
+        header_param.type = (*property)["type"].get<std::string>();
+        (*property)["x-mcp-header"] = header_param.name;
         const auto already_required = std::find(required.begin(), required.end(),
                                                 core::Json(header_param.name)) != required.end();
         if (header_param.required && !already_required) {

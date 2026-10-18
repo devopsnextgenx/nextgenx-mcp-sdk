@@ -40,7 +40,7 @@ data: {"id":1,"jsonrpc":"2.0","result":{"_meta":{"io.modelcontextprotocol/server
 
 ## CTest discovery and results
 
-`ctest --test-dir build -N` discovered 31 independent cases:
+`ctest --test-dir build -N` discovered 32 independent cases:
 
 ```text
 cppmcp_json_rpc_test
@@ -50,6 +50,7 @@ cppmcp_phase2_memory_test
 cppmcp_phase2_stdio_test
 cppmcp_http_handler_test
 cppmcp_http_handler_mcp_param_stateless_test
+cppmcp_http_handler_mcp_param_types_test
 cppmcp_cancellation_test
 cppmcp_http_server_methods_test
 cppmcp_http_server_host_origin_test
@@ -79,8 +80,8 @@ cppmcp_http_server_mcp_param_stateless_test
 `ctest --test-dir build --output-on-failure`:
 
 ```text
-100% tests passed, 0 tests failed out of 31
-Total Test time (real) = 6.04 sec
+100% tests passed, 0 tests failed out of 32
+Total Test time (real) = 6.03 sec
 ```
 
 ## Fuzz, install, and performance smoke
@@ -101,7 +102,7 @@ The installed-package consumer configured, linked against
 `python3 scripts/perf_smoke_http.py build/cppmcp_http_server`:
 
 ```text
-perf smoke: requests=100 throughput=196.4 req/s median=5.09 ms p95=5.22 ms
+perf smoke: requests=100 throughput=194.6 req/s median=5.12 ms p95=5.33 ms
 ```
 
 This is a local smoke measurement, not a controlled benchmark.
@@ -134,6 +135,21 @@ Actions, and the Inspector web UI were not run locally.
 
 ## Sanitizers
 
-ASan/UBSan and TSan results from
-`scripts/verify_3b.sh --slice 5 --sanitizers` will be appended after the final
-gate run.
+Final `scripts/verify_3b.sh --slice 5 --sanitizers` output:
+
+```text
+== sanitizers
+  PASS: sanitizer [address,undefined]: tests pass, zero findings
+  PASS: sanitizer [thread]: tests pass, zero findings
+
+RESULT: 44 passed, 0 failed (logs: /tmp/tmp.vPmpq5drHr)
+```
+
+The first TSan run found a listener shutdown race: `stop()` closed the acceptor
+while the nonblocking accept loop could still be using it, and a connection
+worker could notify the shutdown condition variable after it was destroyed.
+Shutdown now joins the accept loop before closing the acceptor, and the worker
+signals while holding the mutex used by the shutdown wait. The full 32-test
+TSan suite passed after these fixes. GCC's `-Wtsan` diagnostic for
+`std::atomic_thread_fence` in libstdc++/Asio is kept visible but not promoted
+to an error in the two affected build targets.

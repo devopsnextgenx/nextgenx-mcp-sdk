@@ -2,6 +2,7 @@
 #include "test.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -379,7 +380,7 @@ void test_http_handler_header_params_stateless() {
     auto list = std::make_shared<MockExchange>(make_request("tools/list"));
     first_handler.handle(list);
     CPPMCP_CHECK(response_json(*list)["result"]["tools"][0]["inputSchema"]["properties"]
-                                      ["region"]["x-mcp-header"] == "Mcp-Param-region");
+                                      ["region"]["x-mcp-header"] == "region");
 
     auto mismatch_request = make_call("north");
     mismatch_request.headers.erase(
@@ -408,4 +409,78 @@ void test_http_handler_header_params_stateless() {
         registration_rejected = true;
     }
     CPPMCP_CHECK(registration_rejected);
+
+    bool duplicate_rejected = false;
+    try {
+        first.add_tool(cppmcp::ToolDefinition{
+            .name = "duplicate",
+            .title = "Duplicate",
+            .description = "Duplicate mirrored names differ only by case.",
+            .input_schema =
+                Json{{"type", "object"},
+                     {"properties",
+                      {{"region", {{"type", "string"}}},
+                       {"Region", {{"type", "string"}}}}}},
+            .output_schema = Json::object(),
+            .annotations = cppmcp::ToolAnnotation{},
+            .meta = Json::object(),
+            .handler = [](const Json&, const Json&) { return Json::object(); },
+        }.header_param("region").header_param("Region"));
+    } catch (const std::invalid_argument&) {
+        duplicate_rejected = true;
+    }
+    CPPMCP_CHECK(duplicate_rejected);
+}
+
+void test_http_handler_header_params_primitive_types() {
+    Server server;
+    server.add_tool(cppmcp::ToolDefinition{
+        .name = "mixed",
+        .title = "Mixed",
+        .description = "Return mirrored primitive arguments.",
+        .input_schema =
+            Json{{"type", "object"},
+                 {"properties",
+                  {{"count", {{"type", "integer"}}},
+                   {"enabled", {{"type", "boolean"}}}}}},
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
+        .handler = [](const Json& args, const Json&) { return args; },
+    }.header_param("count").header_param("enabled"));
+    McpHttpHandler handler(server);
+    const auto make_call = [](std::int64_t count, bool enabled,
+                              std::string count_header, std::string enabled_header) {
+        auto request = make_request(
+            "tools/call", {{"name", "mixed"},
+                           {"arguments", {{"count", count}, {"enabled", enabled}}}});
+        add_name_header(request, "mixed");
+        request.headers.emplace_back("Mcp-Param-count", std::move(count_header));
+        request.headers.emplace_back("Mcp-Param-enabled", std::move(enabled_header));
+        return std::make_shared<MockExchange>(std::move(request));
+    };
+
+    auto valid = make_call(-7, true, "-7", "true");
+    handler.handle(valid);
+    CPPMCP_CHECK(valid->status == 200);
+    auto mismatch = make_call(42, false, "42", "1");
+    handler.handle(mismatch);
+    CPPMCP_CHECK(mismatch->status == 400);
+    auto unsafe_integer = make_call(9007199254740991LL, true,
+                                    "9007199254740992", "true");
+    unsafe_integer->request_.body =
+        make_request("tools/call",
+                     {{"name", "mixed"},
+                      {"arguments",
+                       {{"count", 9007199254740992ULL}, {"enabled", true}}}})
+            .body;
+    handler.handle(unsafe_integer);
+    CPPMCP_CHECK(unsafe_integer->status == 400);
+
+    auto list = std::make_shared<MockExchange>(make_request("tools/list"));
+    handler.handle(list);
+    const auto schema = response_json(*list)["result"]["tools"][0]["inputSchema"];
+    CPPMCP_CHECK(schema["properties"]["count"]["x-mcp-header"] == "count");
+    CPPMCP_CHECK(schema["properties"]["enabled"]["x-mcp-header"] == "enabled");
+    CPPMCP_CHECK(schema["required"] == Json::array({"count", "enabled"}));
 }

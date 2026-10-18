@@ -170,11 +170,16 @@ selected JSON-RPC body fields into HTTP headers so that intermediaries (load
 balancers, gateways, observability tooling) can route and inspect requests
 without parsing the body.” The body remains authoritative: for mirrored
 fields, mismatches are rejected with `400 Bad Request` and `HeaderMismatch`.
+The linked [tool-definition extension](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#x-mcp-header)
+states: “The `x-mcp-header` property specifies the name portion used to
+construct the header name `Mcp-Param-{name}`.”
 The implementation applies that rule to `Mcp-Method`, `Mcp-Name`, and declared
-`Mcp-Param-*` values. For parameters, the tool builder declares a string
-property, publishes its `x-mcp-header` annotation, and requires exactly one
-matching `Mcp-Param-<name>` header when the property is supplied (and for
-required properties).
+`Mcp-Param-*` values. For tool parameters, `x-mcp-header` stores the suffix
+used to form the `Mcp-Param-{name}` header. The implementation supports string,
+integer, and boolean properties, converts primitive arguments to the
+specification's text representation, and requires exactly one matching header
+when the property is supplied (and for required properties). Mirrored integer
+values are restricted to JavaScript's safe integer range.
 
 The delivered HTTP transport includes the Asio/llhttp socket listener, JSON
 responses, request-scoped SSE, cancellation on disconnect, hardening and

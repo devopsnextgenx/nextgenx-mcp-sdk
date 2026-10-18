@@ -37,6 +37,7 @@ struct ToolAnnotation {
 struct HeaderParamDefinition {
     std::string name;
     bool required = true;
+    std::string type = "string";
 };
 
 class ToolBuilder;

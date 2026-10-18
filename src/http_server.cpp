@@ -652,8 +652,8 @@ struct HttpServerHandle::Impl {
                                 std::remove(active_sockets.begin(), active_sockets.end(), socket),
                                 active_sockets.end());
                             --active_connections;
+                            workers_cv.notify_all();
                         }
-                        workers_cv.notify_all();
                     }).detach();
                 } catch (const std::exception& error) {
                     CPPMCP_LOG_ERROR("could not start HTTP connection worker: " << error.what());
@@ -680,6 +680,9 @@ struct HttpServerHandle::Impl {
         if (stopping.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
+        if (accept_thread.joinable()) {
+            accept_thread.join();
+        }
         asio::error_code ignored;
         acceptor.close(ignored);
         {
@@ -688,9 +691,6 @@ struct HttpServerHandle::Impl {
                 socket->shutdown(Tcp::socket::shutdown_both, ignored);
                 socket->close(ignored);
             }
-        }
-        if (accept_thread.joinable()) {
-            accept_thread.join();
         }
         {
             std::unique_lock<std::mutex> lock(workers_mutex);

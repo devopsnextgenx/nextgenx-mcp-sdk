@@ -52,12 +52,14 @@
   Transports that close an individual response stream override the strategy
   and `cancel_request`; closing an entire client transport is not an acceptable
   substitute for per-request cancellation.
-- `ToolDefinition::header_param(name, required)` declares a string input
-  property mirrored as `Mcp-Param-<name>`. Registration validates the schema,
-  marks the property with `x-mcp-header`, and adds required parameters to the
-  schema's `required` list. Request validation decodes the mirrored value and
-  requires it to match the JSON argument. Mirrored declarations live on each
-  `Server` instance; there is no process-global tool registry.
+- `ToolDefinition::header_param(name, required)` declares a string, integer,
+  or boolean input property mirrored as `Mcp-Param-<name>`. Its
+  `x-mcp-header` annotation stores only the name suffix. Registration
+  validates the property and adds required parameters to the schema's
+  `required` list. Request validation decodes the mirrored value, converts
+  primitive arguments to their specified string form, and requires a match;
+  mirrored integers are restricted to JavaScript's safe range. Declarations
+  live on each `Server` instance; there is no process-global tool registry.
 
 ## Phase 3B HTTP server
 

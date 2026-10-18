@@ -140,6 +140,10 @@ if(CPPMCP_BUILD_STATIC)
     target_include_directories(cppmcp_transport_http SYSTEM PRIVATE
         ${asio_SOURCE_DIR}/asio/include
     )
+    # GCC reports libstdc++'s Asio TSan fences as errors despite instrumenting project code.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_FLAGS MATCHES "-fsanitize=thread")
+        target_compile_options(cppmcp_transport_http PRIVATE -Wno-error=tsan)
+    endif()
 endif()
 
 if(CPPMCP_BUILD_FUZZERS)
@@ -264,6 +268,9 @@ if(CPPMCP_BUILD_TESTS)
     endif()
     target_compile_features(cppmcp_core_tests PRIVATE cxx_std_20)
     cppmcp_configure_warnings(cppmcp_core_tests)
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_FLAGS MATCHES "-fsanitize=thread")
+        target_compile_options(cppmcp_core_tests PRIVATE -Wno-error=tsan)
+    endif()
     target_include_directories(cppmcp_core_tests SYSTEM PRIVATE
         ${asio_SOURCE_DIR}/asio/include
     )
@@ -272,7 +279,8 @@ if(CPPMCP_BUILD_TESTS)
     )
     foreach(test_name IN ITEMS
             json_rpc versions schema_contract phase2_memory phase2_stdio
-            http_handler http_handler_mcp_param_stateless cancellation
+            http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types
+            cancellation
             http_server_methods http_server_host_origin
             http_server_smuggling http_server_slowloris http_server_auth_route_bind
             http_server_allow_header http_server_unknown_route http_server_duplicate_host

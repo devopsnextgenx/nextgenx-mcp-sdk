@@ -26,6 +26,7 @@ void test_http_server_disconnect_cancel();
 void test_http_server_sse_soak();
 void test_http_server_mcp_param_stateless();
 void test_http_handler_header_params_stateless();
+void test_http_handler_header_params_primitive_types();
 void test_http_server_allow_header();
 void test_http_server_unknown_route();
 void test_http_server_duplicate_host();
@@ -82,6 +83,8 @@ int main(int argc, char** argv) {
     run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
     run_selected("http_handler", test_http_handler);
     run_selected("http_handler_mcp_param_stateless", test_http_handler_header_params_stateless);
+    run_selected("http_handler_mcp_param_types",
+                 test_http_handler_header_params_primitive_types);
     run_selected("cancellation", test_cancellation_strategy);
     run_selected("http_server_methods", test_http_server_methods);
     run_selected("http_server_host_origin", test_http_server_host_origin);

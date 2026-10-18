@@ -5,25 +5,26 @@
 | Slice | Status | Gate |
 |---|---|---|
 | 1 - real listener | Complete | `scripts/verify_3b.sh --slice 1` passed; commit `859a77b` |
-| 2 - limits and hardening | Complete | `scripts/verify_3b.sh --slice 2` passed |
-| 3 - SSE and cancellation | Complete | `scripts/verify_3b.sh --slice 3` passed |
-| 4 - mirrored tool parameters | Complete | `scripts/verify_3b.sh --slice 4` passed |
-| 5 - evidence and docs | In progress | - |
+| 2 - limits and hardening | Complete | `scripts/verify_3b.sh --slice 2` passed; commit `caafcc3` |
+| 3 - SSE and cancellation | Complete | `scripts/verify_3b.sh --slice 3` passed; commit `14c0550` |
+| 4 - mirrored tool parameters | Complete | `scripts/verify_3b.sh --slice 4` passed; commit `43d09da` |
+| 5 - evidence and docs | Complete | `scripts/verify_3b.sh --slice 5 --sanitizers` passed |
 
 ## Last gate output
 
 ```text
-== slice 4: x-mcp-header
-  PASS: a tool advertises x-mcp-header in inputSchema
-  PASS: ctest lists x-mcp-header tests
+== sanitizers
+  PASS: sanitizer [address,undefined]: tests pass, zero findings
+  PASS: sanitizer [thread]: tests pass, zero findings
 
-RESULT: 28 passed, 0 failed (logs: /tmp/tmp.1YL0cF0d3Y)
+RESULT: 44 passed, 0 failed (logs: /tmp/tmp.vPmpq5drHr)
 ```
 
-The Slice 4 gate also passed the Slice 1–3 smoke checks. Both focused
-`mcp_param` CTest cases passed: socket-free and real-socket two-instance
-stateless routing, including encoded non-ASCII values and mismatched-header
-rejection.
+The final gate also passed the Slice 1–5 protocol and documentation checks.
+`ctest` discovered and passed 32 independent cases. The ASan/UBSan and TSan
+configurations both passed with zero findings. See [3B_EVIDENCE.md](3B_EVIDENCE.md)
+for the curl transcripts, full CTest list, fuzz smoke, performance measurement,
+install/export check, and interop attempts.
 
 Previous gate output:
 
@@ -45,13 +46,15 @@ passed on `.github/workflows/ci.yml`.
 
 ## Open problems
 
-- Slice 5 still needs fuzz targets/smoke, perf smoke, documentation and evidence,
-  package/export validation, and Claude Code/MCP Inspector attempts.
 - The detailed `cpp-mcp-sdk-phase3b-prompt.md` referenced by the execution
-  instructions is not present in this workspace. The acceptance gate and
-  checked-in protocol notes are being used as the requirements.
+  instructions was not present in this workspace. The acceptance gate and the
+  versioned specification notes were used as requirements.
+- The MCP Inspector CLI attempt was rejected because its request's
+  `MCP-Protocol-Version` header did not match its body metadata; this is recorded
+  in the evidence file. Claude Code accepted the endpoint configuration, but
+  its registration command does not establish transport interoperability.
 
 ## Next action
 
-Implement Slice 5 evidence, fuzzing, documentation, and interop attempts, then
-run `scripts/verify_3b.sh --slice 5 --sanitizers`.
+Phase 3B is complete. Scope the Phase 3C work (`subscriptions/listen`, TLS,
+HTTP client/SSE parser, and client listen/reconnect) before implementation.

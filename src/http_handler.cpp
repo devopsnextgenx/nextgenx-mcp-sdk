@@ -4,6 +4,7 @@
 #include <cctype>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <stop_token>
 #include <stdexcept>
@@ -424,10 +425,28 @@ bool validate_mirrored_params(const Server& server, const Request& request,
             }
             continue;
         }
+        std::optional<std::string> expected;
+        if (argument->is_string() && declaration.type == "string") {
+            expected = argument->get<std::string>();
+        } else if (argument->is_boolean() && declaration.type == "boolean") {
+            expected = argument->get<bool>() ? "true" : "false";
+        } else if (declaration.type == "integer" && argument->is_number_unsigned()) {
+            constexpr std::uint64_t max_safe_integer = 9007199254740991ULL;
+            const auto integer = argument->get<std::uint64_t>();
+            if (integer <= max_safe_integer) {
+                expected = std::to_string(integer);
+            }
+        } else if (declaration.type == "integer" && argument->is_number_integer()) {
+            constexpr std::int64_t max_safe_integer = 9007199254740991LL;
+            const auto integer = argument->get<std::int64_t>();
+            if (integer >= -max_safe_integer && integer <= max_safe_integer) {
+                expected = std::to_string(integer);
+            }
+        }
         std::string decoded;
-        if (argument == nullptr || !argument->is_string() || values.size() != 1 ||
+        if (!expected || values.size() != 1 ||
             !decode_mirrored_header_value(values.front(), decoded) ||
-            decoded != argument->get<std::string>()) {
+            decoded != *expected) {
             error = mismatch(header_name);
             return false;
         }
