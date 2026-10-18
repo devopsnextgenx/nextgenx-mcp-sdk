@@ -786,16 +786,16 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                                                "Legacy session not found"));
             return;
         }
-        auto& sse = exchange->begin_sse(200, {{"Content-Type", "text/event-stream"},
-                                              {"Cache-Control", "no-cache"},
-                                              {"X-Accel-Buffering", "no"}});
-        sse.write_event(R"({"jsonrpc":"2.0","method":"ping","params":{}})");
         const std::weak_ptr<SubscriptionRegistry> weak_registry = registry;
         exchange->on_disconnect([weak_registry, stream_token] {
             if (const auto active_registry = weak_registry.lock()) {
                 active_registry->close_legacy_stream(stream_token);
             }
         });
+        auto& sse = exchange->begin_sse(200, {{"Content-Type", "text/event-stream"},
+                                              {"Cache-Control", "no-cache"},
+                                              {"X-Accel-Buffering", "no"}});
+        sse.write_event(R"({"jsonrpc":"2.0","method":"ping","params":{}})");
         for (;;) {
             Json event;
             const auto status = registry->next_legacy_stream(

@@ -3,6 +3,11 @@
 
 #include <asio.hpp>
 #include <llhttp.h>
+#if defined(_WIN32)
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
 #if CPPMCP_WITH_TLS
 #include <asio/ssl.hpp>
 #include <openssl/ssl.h>
@@ -28,6 +33,20 @@
 
 namespace cppmcp {
 namespace {
+
+using NativeSocket = asio::ip::tcp::socket::native_handle_type;
+constexpr NativeSocket invalid_native_socket = static_cast<NativeSocket>(-1);
+
+void shutdown_native_socket(NativeSocket socket) {
+    if (socket == invalid_native_socket) {
+        return;
+    }
+#if defined(_WIN32)
+    ::shutdown(socket, SD_BOTH);
+#else
+    ::shutdown(socket, SHUT_RDWR);
+#endif
+}
 
 struct Url {
     std::string host;
@@ -58,6 +77,11 @@ public:
 
 private:
     int status_;
+};
+
+class AuthRetryRequested final : public std::runtime_error {
+public:
+    AuthRetryRequested() : std::runtime_error("authentication provider requested a retry") {}
 };
 
 Response& response_state(llhttp_t* parser) {
@@ -129,14 +153,15 @@ struct StreamingResponse {
     bool header_field_open = false;
     bool headers_complete = false;
     bool message_complete = false;
+    bool auth_retry_requested = false;
     transport::SseParser parser;
     std::function<void(const transport::SseEvent&)> event_callback;
-    std::function<void(const StreamingResponse&)> headers_callback;
+    std::function<void(StreamingResponse&)> headers_callback;
     std::string callback_error;
 
     StreamingResponse(std::size_t limit,
                       std::function<void(const transport::SseEvent&)> callback,
-                      std::function<void(const StreamingResponse&)> on_headers)
+                      std::function<void(StreamingResponse&)> on_headers)
         : parser(limit), event_callback(std::move(callback)),
           headers_callback(std::move(on_headers)) {}
 };
@@ -297,13 +322,23 @@ void configure_client_tls_context(asio::ssl::context& context,
 
 template <typename SslStream>
 void prepare_client_tls_stream(SslStream& stream, const Url& url,
-                               const HttpClientOptions& options) {
+                               const HttpClientOptions& options,
+                               const std::shared_ptr<std::atomic<bool>>& hostname_mismatch) {
     if (options.dangerous_disable_verification) {
         stream.set_verify_mode(asio::ssl::verify_none);
         CPPMCP_LOG_WARN("DANGEROUS: TLS certificate and hostname verification disabled");
     } else {
         stream.set_verify_mode(asio::ssl::verify_peer);
-        stream.set_verify_callback(asio::ssl::host_name_verification(url.host));
+        const auto verify_hostname = asio::ssl::host_name_verification(url.host);
+        stream.set_verify_callback(
+            [verify_hostname, hostname_mismatch](bool preverified,
+                                                  asio::ssl::verify_context& context) mutable {
+                const bool verified = verify_hostname(preverified, context);
+                if (preverified && !verified) {
+                    hostname_mismatch->store(true, std::memory_order_relaxed);
+                }
+                return verified;
+            });
     }
     if (SSL_set_tlsext_host_name(stream.native_handle(), url.host.c_str()) != 1) {
         throw std::runtime_error("TLS failed to set the server name");
@@ -312,7 +347,8 @@ void prepare_client_tls_stream(SslStream& stream, const Url& url,
 
 template <typename SslStream>
 void perform_client_tls_handshake(SslStream& stream,
-                                  std::chrono::milliseconds timeout) {
+                                  std::chrono::milliseconds timeout,
+                                  const std::shared_ptr<std::atomic<bool>>& hostname_mismatch) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     for (;;) {
         asio::error_code error;
@@ -329,11 +365,12 @@ void perform_client_tls_handshake(SslStream& stream,
         }
         const long verify_result = SSL_get_verify_result(stream.native_handle());
         std::string reason = error.message();
-        if (verify_result == X509_V_ERR_CERT_HAS_EXPIRED) {
-            reason = "certificate has expired";
-        } else if (verify_result == X509_V_ERR_HOSTNAME_MISMATCH ||
-                   verify_result == X509_V_ERR_IP_ADDRESS_MISMATCH) {
+        if (hostname_mismatch->load(std::memory_order_relaxed) ||
+            verify_result == X509_V_ERR_HOSTNAME_MISMATCH ||
+            verify_result == X509_V_ERR_IP_ADDRESS_MISMATCH) {
             reason = "certificate hostname or IP address mismatch";
+        } else if (verify_result == X509_V_ERR_CERT_HAS_EXPIRED) {
+            reason = "certificate has expired";
         } else if (verify_result != X509_V_OK) {
             reason = "certificate verification failed (untrusted CA or invalid chain): " +
                      std::string(X509_verify_cert_error_string(verify_result));
@@ -619,9 +656,11 @@ struct HttpClientTransport::Impl {
         if (url.tls) {
             tls_socket =
                 std::make_unique<asio::ssl::stream<asio::ip::tcp::socket&>>(socket, tls_context);
+            auto hostname_mismatch = std::make_shared<std::atomic<bool>>(false);
             try {
-                prepare_client_tls_stream(*tls_socket, url, options);
-                perform_client_tls_handshake(*tls_socket, options.connect_timeout);
+                prepare_client_tls_stream(*tls_socket, url, options, hostname_mismatch);
+                perform_client_tls_handshake(*tls_socket, options.connect_timeout,
+                                             hostname_mismatch);
             } catch (...) {
                 close_socket();
                 throw;
@@ -942,6 +981,7 @@ struct ListenHandle::Impl {
     std::shared_ptr<asio::io_context> active_context;
     std::shared_ptr<asio::ip::tcp::socket> active_socket;
     std::shared_ptr<asio::ip::tcp::resolver> active_resolver;
+    std::atomic<NativeSocket> active_native_socket{invalid_native_socket};
     std::mutex wait_mutex;
     std::condition_variable_any wait_condition;
     std::jthread worker;
@@ -949,6 +989,7 @@ struct ListenHandle::Impl {
     std::int64_t next_request_id = 1;
     std::string last_event_id;
     std::optional<std::chrono::milliseconds> server_retry;
+    bool auth_retry_used = false;
 
     void start() {
         worker = std::jthread([this](std::stop_token stop) { run(stop); });
@@ -960,17 +1001,15 @@ struct ListenHandle::Impl {
             worker.request_stop();
         }
         wait_condition.notify_all();
+        std::shared_ptr<asio::io_context> context;
         {
             std::lock_guard<std::mutex> lock(active_mutex);
-            if (active_resolver) {
-                active_resolver->cancel();
-            }
-            if (active_socket) {
-                asio::error_code ignored;
-                active_socket->cancel(ignored);
-                active_socket->close(ignored);
-            }
+            context = active_context;
         }
+        if (context) {
+            context->stop();
+        }
+        shutdown_native_socket(active_native_socket.load(std::memory_order_acquire));
         if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) {
             worker.join();
         }
@@ -1030,6 +1069,11 @@ struct ListenHandle::Impl {
                     break;
                 }
                 throw std::runtime_error("SSE stream ended unexpectedly");
+            } catch (const AuthRetryRequested&) {
+                if (stop.stop_requested() ||
+                    stop_requested.load(std::memory_order_acquire)) {
+                    break;
+                }
             } catch (const std::exception& error) {
                 if (stop.stop_requested() ||
                     stop_requested.load(std::memory_order_acquire)) {
@@ -1111,12 +1155,31 @@ struct ListenHandle::Impl {
         auto socket = std::make_shared<asio::ip::tcp::socket>(*context);
         {
             std::lock_guard<std::mutex> lock(active_mutex);
-            active_context = context;
-            active_resolver = resolver;
             active_socket = socket;
+            active_resolver = resolver;
+            active_context = context;
+        }
+        if (stop.stop_requested() || stop_requested.load(std::memory_order_acquire)) {
+            return false;
         }
         connect_stream(stop, context, resolver, socket);
         if (stop.stop_requested() || stop_requested.load(std::memory_order_acquire)) {
+            return false;
+        }
+
+        const auto native_socket = socket->native_handle();
+        active_native_socket.store(native_socket, std::memory_order_release);
+        struct NativeSocketRegistration {
+            std::atomic<NativeSocket>& active;
+            NativeSocket socket;
+            ~NativeSocketRegistration() {
+                auto expected = socket;
+                active.compare_exchange_strong(expected, invalid_native_socket,
+                                               std::memory_order_acq_rel);
+            }
+        } registration{active_native_socket, native_socket};
+        if (stop.stop_requested() || stop_requested.load(std::memory_order_acquire)) {
+            shutdown_native_socket(native_socket);
             return false;
         }
 
@@ -1126,8 +1189,10 @@ struct ListenHandle::Impl {
             tls_socket =
                 std::make_unique<asio::ssl::stream<asio::ip::tcp::socket&>>(*socket,
                                                                             tls_context);
-            prepare_client_tls_stream(*tls_socket, url, options);
-            perform_client_tls_handshake(*tls_socket, options.connect_timeout);
+            auto hostname_mismatch = std::make_shared<std::atomic<bool>>(false);
+            prepare_client_tls_stream(*tls_socket, url, options, hostname_mismatch);
+            perform_client_tls_handshake(*tls_socket, options.connect_timeout,
+                                         hostname_mismatch);
         }
 #endif
         auto write_some = [&](asio::const_buffer buffer, asio::error_code& error) {
@@ -1226,6 +1291,7 @@ struct ListenHandle::Impl {
         auto mark_connected = [&] {
             const bool reconnected = has_connected;
             has_connected = true;
+            auth_retry_used = false;
             connected_this_attempt = true;
             signal_ready(reconnected);
         };
@@ -1275,7 +1341,7 @@ struct ListenHandle::Impl {
                 throw std::runtime_error("unexpected JSON-RPC response on a notification stream");
             }
         };
-        auto validate_headers = [&](const StreamingResponse& response) {
+        auto validate_headers = [&](StreamingResponse& response) {
             if (response.status == 401 || response.status == 403) {
                 std::vector<std::string> challenges;
                 for (const auto& [key, value] : response.headers) {
@@ -1284,8 +1350,12 @@ struct ListenHandle::Impl {
                     }
                 }
                 const auto challenge = challenge_for(challenges);
-                if (options.auth_provider) {
-                    (void)options.auth_provider->on_challenge(challenge);
+                if (options.auth_provider &&
+                    options.auth_provider->on_challenge(challenge) == AuthAction::retry &&
+                    !auth_retry_used) {
+                    auth_retry_used = true;
+                    response.auth_retry_requested = true;
+                    throw std::runtime_error("authentication provider requested a retry");
                 }
                 if (response.status == 401) {
                     throw AuthRequired(challenge);
@@ -1333,6 +1403,9 @@ struct ListenHandle::Impl {
             }
             const auto parsed = llhttp_execute(&parser, buffer.data(), count);
             if (parsed != HPE_OK && parsed != HPE_PAUSED) {
+                if (response.auth_retry_requested) {
+                    throw AuthRetryRequested();
+                }
                 if (!response.callback_error.empty()) {
                     throw std::runtime_error(response.callback_error);
                 }

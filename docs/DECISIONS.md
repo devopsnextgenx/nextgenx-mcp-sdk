@@ -107,3 +107,17 @@
 - SSE parsing is incremental and has a configurable event-byte ceiling.
   Incomplete trailing events at end-of-stream are discarded in accordance
   with the event-stream parsing model.
+- Modern change streams use `subscriptions/listen` POST requests and acknowledge
+  the accepted subset before any event. Only the example's advertised
+  `tools.listChanged` capability is accepted today; prompt/resource change
+  hooks exist but those features and capabilities are deferred to Phase 5.
+- Legacy GET notification streams remain session-scoped and are not used by
+  the modern transport. The client reconnects after loss using bounded
+  exponential backoff with jitter and signals callers to refresh their state.
+- OpenSSL 3 enables optional TLS by default when found. Server TLS defaults to
+  TLS 1.2 minimum; clients verify the trust chain and DNS/IP identity unless
+  the explicitly named `dangerous_disable_verification` library option is
+  selected. That option is not exposed by the example CLI.
+- A remote bind must be protected by TLS or an authenticator unless
+  `allow_insecure_remote` explicitly opts out. The example server's
+  `--allow-insecure-remote` flag is intentionally noisy in deployment guidance.

@@ -92,12 +92,11 @@ int main(int argc, char** argv) {
             std::cout << "TOOL " << name << '\n';
             has_add = has_add || name == "add";
         }
-        if (!has_add) {
-            throw std::runtime_error("tools/list did not include add");
+        if (has_add) {
+            const auto add_result = client.call_tool(
+                "add", nlohmann::json{{"a", 1}, {"b", 2}});
+            std::cout << "CALL add -> " << result_text(add_result) << '\n';
         }
-        const auto add_result = client.call_tool(
-            "add", nlohmann::json{{"a", 1}, {"b", 2}});
-        std::cout << "CALL add -> " << result_text(add_result) << '\n';
         if (listen) {
             cppmcp::transport::ListenCallbacks callbacks;
             callbacks.on_stream_lost = [] { std::cout << "STREAM_LOST\n"; };

@@ -186,12 +186,13 @@ values are restricted to JavaScript's safe integer range.
 
 The original Phase 3B HTTP server included the Asio/llhttp socket listener,
 JSON responses, request-scoped SSE, cancellation on disconnect, hardening and
-authentication/route seams. Phase 3D adds the plain-HTTP client and the
-incremental SSE parser. `subscriptions/listen`, TLS, legacy GET-stream
-notifications, and reconnecting client subscriptions remain unimplemented
-until their respective slices pass.
+authentication/route seams. Phase 3D adds the incremental SSE parser and HTTP
+client, modern `subscriptions/listen`, legacy GET-stream notifications,
+reconnecting client subscriptions, and optional OpenSSL TLS support. Prompt and
+resource notifications remain hooks only until their corresponding features are
+implemented.
 
-## Phase 3D transport and subscriptions review (2026-10-17)
+## Phase 3D transport and subscriptions review (2026-10-18)
 
 The 2026-07-28 Streamable HTTP and Subscriptions pages, and the 2025-11-25 and
 2025-03-26 transport overviews were re-read alongside

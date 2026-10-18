@@ -199,6 +199,12 @@ if(CPPMCP_BUILD_FUZZERS)
         ${llhttp_SOURCE_DIR}/include
     )
     target_link_libraries(cppmcp_fuzz_http_request PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_sse_parser fuzz/sse_parser_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_sse_parser PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_www_authenticate fuzz/www_auth_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_www_authenticate PRIVATE cppmcp::transport_http)
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -288,6 +294,7 @@ if(CPPMCP_BUILD_TESTS)
         tests/sse_parser_test.cpp
         tests/www_auth_test.cpp
         tests/subscription_registry_test.cpp
+        tests/phase3d_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio cppmcp::transport_http)
@@ -323,7 +330,16 @@ if(CPPMCP_BUILD_TESTS)
             session_identity dual_mode_legacy dual_mode_modern dual_mode_header_isolation
             dual_mode_runtime dual_mode_server_compat ttl_cache_scope ttl_server_window
             ttl_probe ttl_freshness expiry_reconnect expiry_cleanup expiry_session_timer
-            expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth listen)
+            expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth listen
+            sse_parser_cr_endings sse_parser_field_semantics sse_parser_id_persistence
+            sse_parser_retry_digits sse_parser_truncated_dispatch sse_parser_size_limit
+            www_auth_multi_challenge www_auth_quoted_escapes www_auth_fields
+            listen_tools_filter listen_prompts_filter listen_resources_filter
+            listen_resource_uri listen_fanout listen_overflow listen_global_limit
+            listen_peer_limit listen_cleanup listen_shutdown listen_1000_subscribers
+            listen_no_unrequested_types backoff_base backoff_cap backoff_jitter
+            tls_min_version tls_missing_certificate hostname tls_expired_certificate
+            tls_truncated_stream www_auth_listener_retry)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
 endif()

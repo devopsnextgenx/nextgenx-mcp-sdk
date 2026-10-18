@@ -117,12 +117,12 @@ curl -sS -m 15 "${H[@]}" -H "Authorization: Bearer $TOKEN" \
   -d "$(body tools/list '')" "$URL" | jq
 ```
 
-For a non-loopback deployment, the listener also requires
-`--allow-non-loopback`. Configure allowed hosts/origins and place TLS at a
-trusted reverse proxy. The proxy must preserve `Mcp-*`, `MCP-Protocol-Version`,
-`Origin`, and `Authorization` headers, forward POST bodies without rewriting
-them, and disable response buffering for `text/event-stream`. Do not expose an
-unauthenticated listener to an untrusted network.
+For a non-loopback deployment, configure TLS or authentication. The
+`--allow-insecure-remote` switch is an explicit opt-in for deployments that
+deliberately use neither. Configure allowed hosts/origins and the proxy to
+preserve `Mcp-*`, `MCP-Protocol-Version`, `Origin`, and `Authorization`
+headers, forward POST bodies without rewriting them, and disable response
+buffering for `text/event-stream`.
 
 ## MCP clients
 
@@ -168,3 +168,85 @@ npx @modelcontextprotocol/inspector --cli \
 Interop depends on the client supporting the current stateless Streamable HTTP
 request shape and protocol version. See [3B_EVIDENCE.md](3B_EVIDENCE.md) for
 the recorded tool attempts and their results.
+
+## Notifications with `subscriptions/listen`
+
+Modern clients open a long-lived POST stream with the notification types they
+want to receive. The supplied request fixture includes the required request
+metadata and opts into tool-list changes:
+
+```bash
+./build/cppmcp_http_server --port 8000 --mode dual --notify-interval-ms 5000
+curl -N --max-time 20 \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: subscriptions/listen' \
+  --data-binary @scripts/fixtures/listen_request.json \
+  http://127.0.0.1:8000/mcp
+```
+
+The first `data:` event acknowledges the accepted filters. Subsequent
+`notifications/tools/list_changed` events carry the subscription ID in
+`params._meta["io.modelcontextprotocol/subscriptionId"]`. The server's
+`--notify-interval-ms` option is for exercising the example; applications can
+instead call `Server::notify_tools_list_changed()` when their tool list changes.
+The bundled client can consume and reconnect a stream:
+
+```sh
+./build/cppmcp_http_client --url "$URL" --mode auto --listen --duration-ms 30000
+```
+
+It prints `NOTIFY`, `STREAM_LOST`, and `RECONNECTED` lines as events arrive.
+After reconnection, re-list tools because the client cannot infer changes that
+occurred while the stream was down.
+
+## TLS
+
+OpenSSL 3 is detected by CMake; TLS is enabled by default when it is available.
+Generate a local CA and a server certificate with both DNS and IP subject
+alternative names:
+
+```sh
+mkdir -p tls-local
+openssl req -x509 -newkey rsa:2048 -nodes \
+  -keyout tls-local/ca.key -out tls-local/ca.pem -days 30 \
+  -subj '/CN=cppmcp local test CA'
+openssl req -newkey rsa:2048 -nodes \
+  -keyout tls-local/server.key -out tls-local/server.csr \
+  -subj '/CN=localhost'
+printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\n' > tls-local/server.ext
+openssl x509 -req -in tls-local/server.csr \
+  -CA tls-local/ca.pem -CAkey tls-local/ca.key -CAcreateserial \
+  -out tls-local/server.pem -days 30 -extfile tls-local/server.ext
+```
+
+Start the example server with TLS and connect using the CA bundle:
+
+```sh
+./build/cppmcp_http_server --bind 127.0.0.1 --port 8000 \
+  --tls-cert tls-local/server.pem --tls-key tls-local/server.key
+./build/cppmcp_http_client --url https://localhost:8000/mcp \
+  --mode auto --cacert tls-local/ca.pem
+```
+
+The client verifies the certificate chain and the requested DNS name or IP
+address by default. Do not disable verification in production. For remote
+deployments, configure TLS either on this server or on a trusted reverse proxy.
+If TLS terminates at a proxy, ensure the backend is inaccessible to untrusted
+networks and disable proxy buffering for SSE responses.
+
+## Authentication hook
+
+The example client accepts a static bearer token on the command line:
+
+```sh
+./build/cppmcp_http_client --url "$URL" --mode auto --token "$TOKEN"
+```
+
+Library users can supply an `IAuthProvider`. Its `apply(Headers&)` method adds
+credentials to requests; `on_challenge(const AuthChallenge&)` receives parsed
+Bearer challenge fields and can choose whether the client should retry. Use a
+secret store or short-lived token provider in applications rather than embedding
+tokens in source or shell history. Credential values are not included in client
+logs or authentication error messages.
