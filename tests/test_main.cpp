@@ -24,6 +24,8 @@ void test_http_server_sse_keepalive();
 void test_http_server_slow_consumer();
 void test_http_server_disconnect_cancel();
 void test_http_server_sse_soak();
+void test_http_server_mcp_param_stateless();
+void test_http_handler_header_params_stateless();
 
 namespace {
 
@@ -68,6 +70,7 @@ int main(int argc, char** argv) {
     run_selected("phase2_memory", test_phase2_memory_roundtrip);
     run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
     run_selected("http_handler", test_http_handler);
+    run_selected("http_handler_mcp_param_stateless", test_http_handler_header_params_stateless);
     run_selected("cancellation", test_cancellation_strategy);
     run_selected("http_server_methods", test_http_server_methods);
     run_selected("http_server_host_origin", test_http_server_host_origin);
@@ -80,6 +83,7 @@ int main(int argc, char** argv) {
     run_selected("http_server_slow_consumer", test_http_server_slow_consumer);
     run_selected("http_server_disconnect_cancel", test_http_server_disconnect_cancel);
     run_selected("http_server_sse_soak", test_http_server_sse_soak);
+    run_selected("http_server_mcp_param_stateless", test_http_server_mcp_param_stateless);
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;

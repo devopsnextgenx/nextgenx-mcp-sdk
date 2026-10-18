@@ -78,7 +78,8 @@ std::string valid_tools_request(unsigned short port, const std::string& target =
 std::string tool_call_request(unsigned short port, const std::string& name,
                               const nlohmann::json& arguments,
                               const std::string& target = "/mcp",
-                              const std::string& connection = "close") {
+                              const std::string& connection = "close",
+                              const std::string& extra_headers = {}) {
     const auto body = nlohmann::json{
         {"jsonrpc", "2.0"},
         {"id", 1},
@@ -96,7 +97,7 @@ std::string tool_call_request(unsigned short port, const std::string& name,
            "Accept: application/json, text/event-stream\r\n"
            "MCP-Protocol-Version: 2026-07-28\r\n"
            "Mcp-Method: tools/call\r\n"
-           "Mcp-Name: " + name + "\r\n" +
+           "Mcp-Name: " + name + "\r\n" + extra_headers +
            "Content-Length: " + std::to_string(body.size()) + "\r\n"
            "Connection: " + connection + "\r\n\r\n" + body;
 }
@@ -443,4 +444,65 @@ void test_http_server_sse_soak() {
         }
     }
     listener->stop();
+}
+
+void test_http_server_mcp_param_stateless() {
+    const auto make_tool = [](std::string instance) {
+        return cppmcp::ToolDefinition{
+            .name = "lookup",
+            .title = "Lookup",
+            .description = "Return the supplied region.",
+            .input_schema = nlohmann::json{
+                {"type", "object"},
+                {"properties", {{"region", {{"type", "string"}}}}}},
+            .output_schema = nlohmann::json::object(),
+            .annotations = cppmcp::ToolAnnotation{},
+            .meta = nlohmann::json::object(),
+            .handler = [instance = std::move(instance)](const auto& arguments, const auto&) {
+                return nlohmann::json{{"instance", instance},
+                                      {"region", arguments.at("region")}};
+            },
+        }.header_param("region");
+    };
+    cppmcp::Server first({"param-first", "Param first", "1"});
+    cppmcp::Server second({"param-second", "Param second", "1"});
+    first.add_tool(make_tool("first"));
+    second.add_tool(make_tool("second"));
+    auto first_listener = first.start_http(quick_options());
+    auto second_listener = second.start_http(quick_options());
+
+    const std::string north = "north";
+    const std::string east = "\xE5\x8C\x97\xE4\xBA\xAC";
+    const auto first_response = response_all(
+        first_listener->port(),
+        tool_call_request(first_listener->port(), "lookup", {{"region", north}}, "/mcp",
+                          "close", "Mcp-Param-region: " + north + "\r\n"));
+    const auto second_response = response_all(
+        second_listener->port(),
+        tool_call_request(second_listener->port(), "lookup", {{"region", east}}, "/mcp",
+                          "close", "Mcp-Param-region: " +
+                                      cppmcp::transport::encode_mirrored_header_value(east) +
+                                      "\r\n"));
+    const auto first_body = first_response.substr(first_response.find("\r\n\r\n") + 4);
+    const auto second_body = second_response.substr(second_response.find("\r\n\r\n") + 4);
+    CPPMCP_CHECK(nlohmann::json::parse(first_body)["result"]["structuredContent"]["region"] ==
+                 north);
+    CPPMCP_CHECK(nlohmann::json::parse(first_body)["result"]["structuredContent"]["instance"] ==
+                 "first");
+    CPPMCP_CHECK(nlohmann::json::parse(second_body)["result"]["structuredContent"]["region"] ==
+                 east);
+    CPPMCP_CHECK(nlohmann::json::parse(second_body)["result"]["structuredContent"]["instance"] ==
+                 "second");
+
+    const auto mismatch_response = response_all(
+        first_listener->port(),
+        tool_call_request(first_listener->port(), "lookup", {{"region", north}}, "/mcp",
+                          "close", "Mcp-Param-region: south\r\n"));
+    const auto mismatch_body =
+        mismatch_response.substr(mismatch_response.find("\r\n\r\n") + 4);
+    CPPMCP_CHECK(mismatch_response.starts_with("HTTP/1.1 400 Bad Request"));
+    CPPMCP_CHECK(nlohmann::json::parse(mismatch_body)["error"]["code"] ==
+                 static_cast<int>(cppmcp::core::ErrorCode::header_mismatch));
+    first_listener->stop();
+    second_listener->stop();
 }

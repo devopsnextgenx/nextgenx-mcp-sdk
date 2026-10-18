@@ -1,12 +1,23 @@
 #include "cppmcp/server.hpp"
 
+#include <algorithm>
 #include <exception>
+#include <set>
 #include <stdexcept>
 
 #include "cppmcp/core/log.hpp"
 
 namespace cppmcp {
 namespace {
+
+bool valid_header_param_name(std::string_view name) {
+    constexpr std::string_view punctuation = "!#$%&'*+-.^_`|~";
+    return !name.empty() && std::all_of(name.begin(), name.end(), [&](unsigned char ch) {
+        return (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
+               (ch >= 'a' && ch <= 'z') ||
+               punctuation.find(static_cast<char>(ch)) != std::string_view::npos;
+    });
+}
 
 core::Json tool_payload(const ToolDefinition& tool) {
     core::Json item = {
@@ -38,6 +49,73 @@ core::Json tool_payload(const ToolDefinition& tool) {
 
 Server::Server(ServerInfo info) : info_(std::move(info)) {}
 
+ToolBuilder::ToolBuilder(ToolDefinition tool) : tool_(std::move(tool)) {}
+
+ToolBuilder& ToolBuilder::header_param(std::string name, bool required) {
+    header_params_.push_back({std::move(name), required});
+    return *this;
+}
+
+ToolBuilder ToolDefinition::header_param(std::string name, bool required) & {
+    return ToolBuilder(*this).header_param(std::move(name), required);
+}
+
+ToolBuilder ToolDefinition::header_param(std::string name, bool required) && {
+    return ToolBuilder(std::move(*this)).header_param(std::move(name), required);
+}
+
+void ToolBuilder::validate_and_annotate() {
+    if (header_params_.empty()) {
+        return;
+    }
+    auto& schema = tool_.input_schema;
+    if (!schema.is_object()) {
+        throw std::invalid_argument(
+            "header parameters require an object inputSchema with properties");
+    }
+    const auto type = schema.find("type");
+    const auto properties = schema.find("properties");
+    if (!schema.is_object() || type == schema.end() || !type->is_string() ||
+        type->get<std::string>() != "object" || properties == schema.end() ||
+        !properties->is_object()) {
+        throw std::invalid_argument(
+            "header parameters require an object inputSchema with properties");
+    }
+
+    auto required_it = schema.find("required");
+    core::Json required = required_it == schema.end() ? core::Json::array() : *required_it;
+    if (!required.is_array()) {
+        throw std::invalid_argument("inputSchema.required must be an array");
+    }
+    std::set<std::string> names;
+    for (const auto& header_param : header_params_) {
+        if (!valid_header_param_name(header_param.name) ||
+            !names.insert(header_param.name).second) {
+            throw std::invalid_argument("header parameter names must be unique HTTP tokens");
+        }
+        auto property = schema["properties"].find(header_param.name);
+        if (property == schema["properties"].end() || !property->is_object() ||
+            !property->contains("type") || !(*property)["type"].is_string() ||
+            (*property)["type"].get<std::string>() != "string" ||
+            property->contains("x-mcp-header")) {
+            throw std::invalid_argument(
+                "header parameters must name an unannotated string inputSchema property");
+        }
+        (*property)["x-mcp-header"] = "Mcp-Param-" + header_param.name;
+        const auto already_required = std::find(required.begin(), required.end(),
+                                                core::Json(header_param.name)) != required.end();
+        if (header_param.required && !already_required) {
+            required.push_back(header_param.name);
+        } else if (!header_param.required && already_required) {
+            throw std::invalid_argument(
+                "optional header parameters cannot be required by inputSchema");
+        }
+    }
+    if (!required.empty() || schema.contains("required")) {
+        schema["required"] = std::move(required);
+    }
+}
+
 ToolContext::ToolContext(std::stop_token cancellation,
                          std::function<void(nlohmann::json)> emitter)
     : cancellation_(cancellation), emitter_(std::move(emitter)) {}
@@ -61,6 +139,7 @@ void Server::add_tool(ToolDefinition tool) {
     std::lock_guard<std::mutex> lock(mutex_);
     CPPMCP_LOG_DEBUG("registering tool '" << tool.name << "'");
     context_handlers_.erase(tool.name);
+    header_params_.erase(tool.name);
     tools_[tool.name] = std::move(tool);
 }
 
@@ -70,8 +149,36 @@ void Server::add_tool(ToolDefinition tool, ContextToolHandler context_handler) {
     }
     std::lock_guard<std::mutex> lock(mutex_);
     CPPMCP_LOG_DEBUG("registering context tool '" << tool.name << "'");
+    header_params_.erase(tool.name);
     context_handlers_[tool.name] = std::move(context_handler);
     tools_[tool.name] = std::move(tool);
+}
+
+void Server::add_tool(ToolBuilder tool) {
+    tool.validate_and_annotate();
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto name = tool.tool_.name;
+    CPPMCP_LOG_DEBUG("registering tool '" << name << "' with "
+                                          << tool.header_params_.size()
+                                          << " mirrored parameter(s)");
+    context_handlers_.erase(name);
+    header_params_[name] = std::move(tool.header_params_);
+    tools_[name] = std::move(tool.tool_);
+}
+
+void Server::add_tool(ToolBuilder tool, ContextToolHandler context_handler) {
+    if (!context_handler) {
+        throw std::invalid_argument("context tool handler must not be empty");
+    }
+    tool.validate_and_annotate();
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto name = tool.tool_.name;
+    CPPMCP_LOG_DEBUG("registering context tool '" << name << "' with "
+                                                  << tool.header_params_.size()
+                                                  << " mirrored parameter(s)");
+    context_handlers_[name] = std::move(context_handler);
+    header_params_[name] = std::move(tool.header_params_);
+    tools_[name] = std::move(tool.tool_);
 }
 
 bool Server::has_tool(const std::string& name) const {
@@ -87,6 +194,12 @@ std::vector<ToolDefinition> Server::tools() const {
         result.push_back(tool);
     }
     return result;
+}
+
+std::vector<HeaderParamDefinition> Server::tool_header_params(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = header_params_.find(name);
+    return it == header_params_.end() ? std::vector<HeaderParamDefinition>{} : it->second;
 }
 
 nlohmann::json Server::discover() const {

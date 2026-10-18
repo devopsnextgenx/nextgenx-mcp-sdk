@@ -34,6 +34,13 @@ struct ToolAnnotation {
     bool open_world_hint = false;
 };
 
+struct HeaderParamDefinition {
+    std::string name;
+    bool required = true;
+};
+
+class ToolBuilder;
+
 struct ToolDefinition {
     std::string name;
     std::string title;
@@ -43,6 +50,24 @@ struct ToolDefinition {
     ToolAnnotation annotations;
     nlohmann::json meta = nlohmann::json::object();
     std::function<nlohmann::json(const nlohmann::json&, const nlohmann::json&)> handler;
+
+    ToolBuilder header_param(std::string name, bool required = true) &;
+    ToolBuilder header_param(std::string name, bool required = true) &&;
+};
+
+class ToolBuilder {
+public:
+    explicit ToolBuilder(ToolDefinition tool);
+
+    ToolBuilder& header_param(std::string name, bool required = true);
+
+private:
+    void validate_and_annotate();
+
+    ToolDefinition tool_;
+    std::vector<HeaderParamDefinition> header_params_;
+
+    friend class Server;
 };
 
 class ToolContext {
@@ -84,8 +109,11 @@ public:
 
     void add_tool(ToolDefinition tool);
     void add_tool(ToolDefinition tool, ContextToolHandler context_handler);
+    void add_tool(ToolBuilder tool);
+    void add_tool(ToolBuilder tool, ContextToolHandler context_handler);
     bool has_tool(const std::string& name) const;
     std::vector<ToolDefinition> tools() const;
+    std::vector<HeaderParamDefinition> tool_header_params(const std::string& name) const;
 
     nlohmann::json discover() const;
     core::Message handle_message(const core::Message& message, ToolContext* context = nullptr);
@@ -103,6 +131,7 @@ private:
     ServerInfo info_;
     std::map<std::string, ToolDefinition> tools_;
     std::map<std::string, ContextToolHandler> context_handlers_;
+    std::map<std::string, std::vector<HeaderParamDefinition>> header_params_;
 };
 
 }  // namespace cppmcp

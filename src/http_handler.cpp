@@ -398,6 +398,53 @@ bool validate_mirrored_headers(const Request& request, const Headers& headers, R
     return true;
 }
 
+bool validate_mirrored_params(const Server& server, const Request& request,
+                              const Headers& headers, RpcError& error) {
+    const auto tool_name = request.params.value("name", std::string{});
+    const auto declarations = server.tool_header_params(tool_name);
+    const auto arguments = request.params.find("arguments");
+    std::vector<std::string> expected_headers;
+    expected_headers.reserve(declarations.size());
+    for (const auto& declaration : declarations) {
+        const auto header_name = "Mcp-Param-" + declaration.name;
+        expected_headers.push_back(lower_ascii(header_name));
+        const auto values = header_values(headers, header_name);
+        const Json* argument = nullptr;
+        if (arguments != request.params.end() && arguments->is_object()) {
+            const auto argument_it = arguments->find(declaration.name);
+            if (argument_it != arguments->end()) {
+                argument = &*argument_it;
+            }
+        }
+        const bool has_argument = argument != nullptr;
+        if (!has_argument) {
+            if (declaration.required || !values.empty()) {
+                error = mismatch(header_name);
+                return false;
+            }
+            continue;
+        }
+        std::string decoded;
+        if (argument == nullptr || !argument->is_string() || values.size() != 1 ||
+            !decode_mirrored_header_value(values.front(), decoded) ||
+            decoded != argument->get<std::string>()) {
+            error = mismatch(header_name);
+            return false;
+        }
+    }
+    for (const auto& [name, _] : headers) {
+        const auto normalized = lower_ascii(name);
+        constexpr std::string_view prefix = "mcp-param-";
+        if (normalized.starts_with(prefix) &&
+            std::find(expected_headers.begin(), expected_headers.end(), normalized) ==
+                expected_headers.end()) {
+            error = mismatch(name);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool has_client_capabilities(const Request& request) {
     const auto meta = request.params.find("_meta");
     if (meta == request.params.end() || !meta->is_object()) {
@@ -603,6 +650,13 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                                                      {"2026-07-28"});
         respond_error(*exchange, 400, version_error, rpc_request.id);
         return;
+    }
+    if (rpc_request.method == "tools/call") {
+        RpcError param_error{};
+        if (!validate_mirrored_params(server_, rpc_request, request.headers, param_error)) {
+            respond_error(*exchange, 400, std::move(param_error), rpc_request.id);
+            return;
+        }
     }
     if (!is_supported_method(rpc_request.method)) {
         respond_error(*exchange, 404,

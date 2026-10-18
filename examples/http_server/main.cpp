@@ -87,11 +87,14 @@ void add_tools(cppmcp::Server& server) {
         }
         return Json{{"count", count}};
     });
-    server.add_tool({
+    server.add_tool(cppmcp::ToolDefinition{
         .name = "weather_like",
         .title = "Weather-like report",
         .description = "Return a deterministic example forecast.",
-        .input_schema = Json{{"type", "object"}},
+        .input_schema = Json{
+            {"type", "object"},
+            {"properties", {{"city", {{"type", "string"},
+                                      {"description", "City for the report."}}}}}},
         .output_schema = Json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = Json::object(),
@@ -100,7 +103,7 @@ void add_tools(cppmcp::Server& server) {
                         {"conditions", "clear"},
                         {"temperature_c", 21}};
         },
-    });
+    }.header_param("city"));
 }
 
 unsigned short parse_port(const std::string& value) {

@@ -2,6 +2,7 @@
 #include "test.hpp"
 
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -322,4 +323,89 @@ void test_http_handler() {
     handler_b.handle(round_robin_b);
     CPPMCP_CHECK(response_json(*round_robin_a)["result"]["structuredContent"]["result"] == "A");
     CPPMCP_CHECK(response_json(*round_robin_b)["result"]["structuredContent"]["result"] == "B");
+}
+
+void test_http_handler_header_params_stateless() {
+    const auto make_tool = [](std::string instance_value) {
+        return cppmcp::ToolDefinition{
+            .name = "lookup",
+            .title = "Lookup",
+            .description = "Return a mirrored region value.",
+            .input_schema = Json{{"type", "object"},
+                                 {"properties", {{"region", {{"type", "string"}}}}}},
+            .output_schema = Json::object(),
+            .annotations = cppmcp::ToolAnnotation{},
+            .meta = Json::object(),
+            .handler = [instance_value = std::move(instance_value)](
+                           const Json& args, const Json&) {
+                return Json{{"region", args.at("region")},
+                            {"instance", instance_value}};
+            },
+        }.header_param("region");
+    };
+
+    Server first({"header-first", "Header first", "1"});
+    Server second({"header-second", "Header second", "1"});
+    first.add_tool(make_tool("first"));
+    second.add_tool(make_tool("second"));
+    McpHttpHandler first_handler(first);
+    McpHttpHandler second_handler(second);
+
+    const auto make_call = [](const std::string& region) {
+        auto request = make_request(
+            "tools/call", {{"name", "lookup"}, {"arguments", {{"region", region}}}});
+        add_name_header(request, "lookup");
+        request.headers.emplace_back(
+            "Mcp-Param-region",
+            cppmcp::transport::encode_mirrored_header_value(region));
+        return request;
+    };
+
+    auto first_call = std::make_shared<MockExchange>(make_call("north"));
+    auto second_call = std::make_shared<MockExchange>(make_call("south"));
+    first_handler.handle(first_call);
+    second_handler.handle(second_call);
+    CPPMCP_CHECK(first_call->status == 200);
+    CPPMCP_CHECK(second_call->status == 200);
+    CPPMCP_CHECK(response_json(*first_call)["result"]["structuredContent"]["region"] ==
+                 "north");
+    CPPMCP_CHECK(response_json(*second_call)["result"]["structuredContent"]["region"] ==
+                 "south");
+    CPPMCP_CHECK(response_json(*first_call)["result"]["structuredContent"]["instance"] ==
+                 "first");
+    CPPMCP_CHECK(response_json(*second_call)["result"]["structuredContent"]["instance"] ==
+                 "second");
+
+    auto list = std::make_shared<MockExchange>(make_request("tools/list"));
+    first_handler.handle(list);
+    CPPMCP_CHECK(response_json(*list)["result"]["tools"][0]["inputSchema"]["properties"]
+                                      ["region"]["x-mcp-header"] == "Mcp-Param-region");
+
+    auto mismatch_request = make_call("north");
+    mismatch_request.headers.erase(
+        std::remove_if(mismatch_request.headers.begin(), mismatch_request.headers.end(),
+                       [](const auto& header) { return header.first == "Mcp-Param-region"; }),
+        mismatch_request.headers.end());
+    auto mismatch_exchange = std::make_shared<MockExchange>(std::move(mismatch_request));
+    first_handler.handle(mismatch_exchange);
+    CPPMCP_CHECK(mismatch_exchange->status == 400);
+    CPPMCP_CHECK(response_json(*mismatch_exchange)["error"]["code"] ==
+                 static_cast<int>(cppmcp::core::ErrorCode::header_mismatch));
+
+    bool registration_rejected = false;
+    try {
+        first.add_tool(cppmcp::ToolDefinition{
+            .name = "invalid",
+            .title = "Invalid",
+            .description = "Invalid header parameter declaration.",
+            .input_schema = Json{{"type", "object"}, {"properties", Json::object()}},
+            .output_schema = Json::object(),
+            .annotations = cppmcp::ToolAnnotation{},
+            .meta = Json::object(),
+            .handler = [](const Json&, const Json&) { return Json::object(); },
+        }.header_param("missing"));
+    } catch (const std::invalid_argument&) {
+        registration_rejected = true;
+    }
+    CPPMCP_CHECK(registration_rejected);
 }
