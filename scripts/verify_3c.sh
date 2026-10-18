@@ -158,11 +158,21 @@ if (( INTEROP == 1 )); then
     (( rc == 0 )) && echo "$out" | grep -q '"tools"' && ok "MCP Inspector CLI: tools/list via dual-mode server" || bad "MCP Inspector CLI failed (rc=$rc)"
   else warn "npx not available; Inspector not run"; fi
   if command -v claude >/dev/null 2>&1; then
-    claude mcp remove cppmcp-verify >/dev/null 2>&1
-    claude mcp add --transport http cppmcp-verify "$URL" >/dev/null 2>&1
-    out="$(timeout 60 claude mcp list 2>&1)"; echo "$out" | grep -i cppmcp-verify
-    echo "$out" | grep -i cppmcp-verify | grep -qiE 'connected|✓' && ok "claude mcp list shows cppmcp-verify connected" || bad "claude mcp list does not show a connected server"
-    claude mcp remove cppmcp-verify >/dev/null 2>&1
+    # Every claude call: stdin closed (no interactive prompts), hard timeout.
+    CL() { local t="$1"; shift; timeout "$t" claude "$@" </dev/null 2>&1; }
+    CL 30 mcp remove cppmcp-verify >/dev/null
+    CL 30 mcp add --transport http cppmcp-verify "$URL" >/dev/null
+    # `get` health-checks only this server; `list` checks every configured server and can be slow.
+    out="$(CL 60 mcp get cppmcp-verify)"; rc=$?
+    echo "$out" | head -n 12
+    if (( rc == 124 )); then
+      warn "claude mcp get timed out after 60s (CLI may be waiting on login/trust; run it manually)"
+    elif echo "$out" | grep -qiE 'connected|✓'; then
+      ok "claude mcp get shows cppmcp-verify connected"
+    else
+      bad "claude mcp get does not show a connected server (rc=$rc)"
+    fi
+    CL 30 mcp remove cppmcp-verify >/dev/null
   else warn "claude CLI not available; Claude Code not run"; fi
 fi
 
