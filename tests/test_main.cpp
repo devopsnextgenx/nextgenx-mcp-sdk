@@ -26,6 +26,17 @@ void test_http_server_disconnect_cancel();
 void test_http_server_sse_soak();
 void test_http_server_mcp_param_stateless();
 void test_http_handler_header_params_stateless();
+void test_http_server_allow_header();
+void test_http_server_unknown_route();
+void test_http_server_duplicate_host();
+void test_http_server_duplicate_origin();
+void test_http_server_invalid_origin();
+void test_http_server_bearer_auth();
+void test_http_server_bearer_reject();
+void test_http_server_missing_param_header();
+void test_http_server_duplicate_param_header();
+void test_http_server_unexpected_param_header();
+void test_http_server_optional_param_header();
 
 namespace {
 
@@ -77,6 +88,18 @@ int main(int argc, char** argv) {
     run_selected("http_server_smuggling", test_http_server_smuggling);
     run_selected("http_server_slowloris", test_http_server_slowloris);
     run_selected("http_server_auth_route_bind", test_http_server_auth_route_bind);
+    run_selected("http_server_allow_header", test_http_server_allow_header);
+    run_selected("http_server_unknown_route", test_http_server_unknown_route);
+    run_selected("http_server_duplicate_host", test_http_server_duplicate_host);
+    run_selected("http_server_duplicate_origin", test_http_server_duplicate_origin);
+    run_selected("http_server_invalid_origin", test_http_server_invalid_origin);
+    run_selected("http_server_bearer_auth", test_http_server_bearer_auth);
+    run_selected("http_server_bearer_reject", test_http_server_bearer_reject);
+    run_selected("http_server_missing_param_header", test_http_server_missing_param_header);
+    run_selected("http_server_duplicate_param_header", test_http_server_duplicate_param_header);
+    run_selected("http_server_unexpected_param_header",
+                 test_http_server_unexpected_param_header);
+    run_selected("http_server_optional_param_header", test_http_server_optional_param_header);
     run_selected("http_server_sse_framing", test_http_server_sse_framing);
     run_selected("http_server_response_modes", test_http_server_response_modes);
     run_selected("http_server_sse_keepalive", test_http_server_sse_keepalive);

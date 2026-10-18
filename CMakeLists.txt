@@ -9,6 +9,7 @@ include(CMakePackageConfigHelpers)
 option(CPPMCP_BUILD_SHARED "Build the shared library" ON)
 option(CPPMCP_BUILD_STATIC "Build the static library" ON)
 option(CPPMCP_BUILD_TESTS "Build unit tests" ON)
+option(CPPMCP_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(CPPMCP_ENABLE_LEGACY "Enable legacy protocol support" ON)
 option(CPPMCP_OFFLINE "Do not fetch dependencies from the network" OFF)
 
@@ -141,6 +142,41 @@ if(CPPMCP_BUILD_STATIC)
     )
 endif()
 
+if(CPPMCP_BUILD_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "CPPMCP_BUILD_FUZZERS requires Clang with libFuzzer")
+    endif()
+    if(NOT CPPMCP_BUILD_STATIC)
+        message(FATAL_ERROR "CPPMCP_BUILD_FUZZERS requires CPPMCP_BUILD_STATIC=ON")
+    endif()
+
+    target_compile_options(cppmcp_llhttp PRIVATE
+        -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer
+    )
+
+    function(cppmcp_add_fuzzer target source)
+        add_executable(${target} ${source})
+        target_compile_features(${target} PRIVATE cxx_std_20)
+        target_compile_options(${target} PRIVATE
+            -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer
+        )
+        target_link_options(${target} PRIVATE -fsanitize=fuzzer,address,undefined)
+        cppmcp_configure_warnings(${target})
+    endfunction()
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_mirrored_header fuzz/mirrored_header_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_mirrored_header PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_mcp_name_param fuzz/mcp_name_param_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_mcp_name_param PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_http_request fuzz/http_request_fuzz.cpp)
+    target_include_directories(cppmcp_fuzz_http_request SYSTEM PRIVATE
+        ${llhttp_SOURCE_DIR}/include
+    )
+    target_link_libraries(cppmcp_fuzz_http_request PRIVATE cppmcp::transport_http)
+endif()
+
 if(CPPMCP_BUILD_SHARED)
     add_library(cppmcp_core_shared SHARED ${CPPMCP_SOURCES})
     add_library(cppmcp::core_shared ALIAS cppmcp_core_shared)
@@ -239,6 +275,11 @@ if(CPPMCP_BUILD_TESTS)
             http_handler http_handler_mcp_param_stateless cancellation
             http_server_methods http_server_host_origin
             http_server_smuggling http_server_slowloris http_server_auth_route_bind
+            http_server_allow_header http_server_unknown_route http_server_duplicate_host
+            http_server_duplicate_origin http_server_invalid_origin
+            http_server_bearer_auth http_server_bearer_reject
+            http_server_missing_param_header http_server_duplicate_param_header
+            http_server_unexpected_param_header http_server_optional_param_header
             http_server_sse_framing http_server_response_modes http_server_sse_keepalive
             http_server_slow_consumer http_server_disconnect_cancel http_server_sse_soak
             http_server_mcp_param_stateless)

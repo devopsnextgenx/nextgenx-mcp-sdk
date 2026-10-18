@@ -52,9 +52,12 @@
   Transports that close an individual response stream override the strategy
   and `cancel_request`; closing an entire client transport is not an acceptable
   substitute for per-request cancellation.
-- The current `Server` tool API does not expose `x-mcp-header` declarations.
-  Tool-parameter header mirroring is deferred until schema validation and
-  client tool-schema caching are implemented together.
+- `ToolDefinition::header_param(name, required)` declares a string input
+  property mirrored as `Mcp-Param-<name>`. Registration validates the schema,
+  marks the property with `x-mcp-header`, and adds required parameters to the
+  schema's `required` list. Request validation decodes the mirrored value and
+  requires it to match the JSON argument. Mirrored declarations live on each
+  `Server` instance; there is no process-global tool registry.
 
 ## Phase 3B HTTP server
 
@@ -81,3 +84,11 @@
 - The HTTP options expose an authenticator callback and a route callback.
   Bearer-token validation is an optional built-in authenticator; the custom
   callback can add application-specific authentication.
+- `docs/QUICKSTART_HTTP.md` documents the example server and its command-line
+  options. `scripts/verify_install.sh` validates installed headers and exported
+  CMake targets with a separate downstream consumer.
+- Three optional Clang/libFuzzer targets cover mirrored-header decoding,
+  `Mcp-Name`/`Mcp-Param-*` value decoding, and llhttp request-target/header
+  parsing. The Linux CI job runs bounded fuzz smoke tests and an HTTP
+  performance smoke; neither is a throughput benchmark or a proof of
+  unbounded fuzz coverage.

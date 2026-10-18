@@ -86,6 +86,9 @@ The in-process `McpHttpHandler` remains available for applications that supply
 their own HTTP exchange adapter. TLS, `subscriptions/listen`, legacy HTTP
 sessions, and an HTTP client remain unimplemented.
 
+See [QUICKSTART_HTTP.md](docs/QUICKSTART_HTTP.md) for curl examples, bearer
+authentication, mirrored parameter headers, and client-tool instructions.
+
 Tools that need request-scoped streaming or disconnect cancellation can use the
 context-handler overload of `Server::add_tool` and call `ToolContext::emit`:
 

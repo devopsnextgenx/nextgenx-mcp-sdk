@@ -2,3 +2,4 @@
 /dist/
 /prompts/
 /build-warn/
+/build-fuzz/

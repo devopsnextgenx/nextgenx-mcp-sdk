@@ -165,8 +165,19 @@ The current revision differs materially from the legacy transport:
   response; `subscriptions/listen` is a distinct long-lived stream for opted-in
   change notifications. Modern streams do not support event IDs or replay.
 
-The current implementation validates the modern request metadata and header
-mirrors, returns JSON or a final-response SSE event, and rejects unsupported
-methods. It does not yet implement the socket adapter, `subscriptions/listen`,
-tool parameter header annotations, legacy sessions, or the HTTP client; those
-behaviors must not be inferred from the in-process handler.
+The versioned transport page states: “The Streamable HTTP transport mirrors
+selected JSON-RPC body fields into HTTP headers so that intermediaries (load
+balancers, gateways, observability tooling) can route and inspect requests
+without parsing the body.” The body remains authoritative: for mirrored
+fields, mismatches are rejected with `400 Bad Request` and `HeaderMismatch`.
+The implementation applies that rule to `Mcp-Method`, `Mcp-Name`, and declared
+`Mcp-Param-*` values. For parameters, the tool builder declares a string
+property, publishes its `x-mcp-header` annotation, and requires exactly one
+matching `Mcp-Param-<name>` header when the property is supplied (and for
+required properties).
+
+The delivered HTTP transport includes the Asio/llhttp socket listener, JSON
+responses, request-scoped SSE, cancellation on disconnect, hardening and
+authentication/route seams. It does not implement `subscriptions/listen`,
+TLS, legacy HTTP sessions, or an HTTP client; those behaviors must not be
+inferred from either the socket-free handler or the network adapter.

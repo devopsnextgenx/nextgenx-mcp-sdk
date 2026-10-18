@@ -117,6 +117,23 @@ void add_context_tool(
     }, std::move(handler));
 }
 
+void add_mirrored_region_tool(cppmcp::Server& server, bool required = true) {
+    server.add_tool(cppmcp::ToolDefinition{
+        .name = "lookup",
+        .title = "Lookup",
+        .description = "Return the supplied region.",
+        .input_schema = nlohmann::json{
+            {"type", "object"},
+            {"properties", {{"region", {{"type", "string"}}}}}},
+        .output_schema = nlohmann::json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = nlohmann::json::object(),
+        .handler = [](const auto& arguments, const auto&) {
+            return nlohmann::json{{"region", arguments.value("region", "")}};
+        },
+    }.header_param("region", required));
+}
+
 cppmcp::transport::HttpOptions quick_options() {
     cppmcp::transport::HttpOptions options;
     options.port = 0;
@@ -264,6 +281,151 @@ void test_http_server_auth_route_bind() {
         refused = true;
     }
     CPPMCP_CHECK(refused);
+}
+
+void test_http_server_allow_header() {
+    cppmcp::Server server;
+    auto listener = server.start_http(quick_options());
+    const auto response = response_headers(listener->port(), request("GET", "/mcp"));
+    CPPMCP_CHECK(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+    CPPMCP_CHECK(response.find("Allow: POST\r\n") != std::string::npos);
+    listener->stop();
+}
+
+void test_http_server_unknown_route() {
+    cppmcp::Server server;
+    auto listener = server.start_http(quick_options());
+    CPPMCP_CHECK(response_status(listener->port(), request("GET", "/unknown")) ==
+                 "HTTP/1.1 404 Not Found");
+    listener->stop();
+}
+
+void test_http_server_duplicate_host() {
+    cppmcp::Server server;
+    auto listener = server.start_http(quick_options());
+    const std::string duplicate_host =
+        "Host: 127.0.0.1\r\nHost: 127.0.0.1\r\n";
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     request("POST", "/mcp", duplicate_host +
+                                 "Content-Type: application/json\r\n", "{}")) ==
+                 "HTTP/1.1 403 Forbidden");
+    listener->stop();
+}
+
+void test_http_server_duplicate_origin() {
+    cppmcp::Server server;
+    auto listener = server.start_http(quick_options());
+    const auto headers = "Host: 127.0.0.1\r\n"
+                         "Origin: https://localhost\r\n"
+                         "Origin: https://localhost\r\n";
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     valid_tools_request(listener->port(), "/mcp", headers)) ==
+                 "HTTP/1.1 403 Forbidden");
+    listener->stop();
+}
+
+void test_http_server_invalid_origin() {
+    cppmcp::Server server;
+    auto listener = server.start_http(quick_options());
+    const auto headers = "Host: 127.0.0.1\r\nOrigin: not-an-origin\r\n";
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     valid_tools_request(listener->port(), "/mcp", headers)) ==
+                 "HTTP/1.1 403 Forbidden");
+    listener->stop();
+}
+
+void test_http_server_bearer_auth() {
+    cppmcp::Server server;
+    auto options = quick_options();
+    options.bearer_token = "test-token";
+    auto listener = server.start_http(options);
+    CPPMCP_CHECK(response_status(
+                     listener->port(), valid_tools_request(listener->port())) ==
+                 "HTTP/1.1 401 Unauthorized");
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     valid_tools_request(listener->port(), "/mcp",
+                                         "Authorization: Bearer test-token\r\n")) ==
+                 "HTTP/1.1 200 OK");
+    listener->stop();
+}
+
+void test_http_server_bearer_reject() {
+    cppmcp::Server server;
+    auto options = quick_options();
+    options.bearer_token = "test-token";
+    auto listener = server.start_http(options);
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     valid_tools_request(listener->port(), "/mcp",
+                                         "Authorization: Bearer wrong\r\n")) ==
+                 "HTTP/1.1 401 Unauthorized");
+    listener->stop();
+}
+
+void test_http_server_missing_param_header() {
+    cppmcp::Server server;
+    add_mirrored_region_tool(server);
+    auto listener = server.start_http(quick_options());
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     tool_call_request(listener->port(), "lookup", {{"region", "north"}})) ==
+                 "HTTP/1.1 400 Bad Request");
+    listener->stop();
+}
+
+void test_http_server_duplicate_param_header() {
+    cppmcp::Server server;
+    add_mirrored_region_tool(server);
+    auto listener = server.start_http(quick_options());
+    const auto extra = "Mcp-Param-region: north\r\nMcp-Param-region: north\r\n";
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     tool_call_request(listener->port(), "lookup", {{"region", "north"}},
+                                       "/mcp", "close", extra)) ==
+                 "HTTP/1.1 400 Bad Request");
+    listener->stop();
+}
+
+void test_http_server_unexpected_param_header() {
+    cppmcp::Server server;
+    server.add_tool(cppmcp::ToolDefinition{
+        .name = "ordinary",
+        .title = "Ordinary",
+        .description = "A tool with no mirrored parameter.",
+        .input_schema = nlohmann::json{{"type", "object"}},
+        .output_schema = nlohmann::json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = nlohmann::json::object(),
+        .handler = [](const auto&, const auto&) { return nlohmann::json::object(); },
+    });
+    auto listener = server.start_http(quick_options());
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     tool_call_request(listener->port(), "ordinary", {},
+                                       "/mcp", "close",
+                                       "Mcp-Param-unexpected: value\r\n")) ==
+                 "HTTP/1.1 400 Bad Request");
+    listener->stop();
+}
+
+void test_http_server_optional_param_header() {
+    cppmcp::Server server;
+    add_mirrored_region_tool(server, false);
+    auto listener = server.start_http(quick_options());
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     tool_call_request(listener->port(), "lookup", {})) ==
+                 "HTTP/1.1 200 OK");
+    CPPMCP_CHECK(response_status(
+                     listener->port(),
+                     tool_call_request(listener->port(), "lookup", {},
+                                       "/mcp", "close", "Mcp-Param-region: north\r\n")) ==
+                 "HTTP/1.1 400 Bad Request");
+    listener->stop();
 }
 
 void test_http_server_sse_framing() {
