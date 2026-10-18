@@ -58,3 +58,21 @@ expiry_guard
 ## Result summary
 
 The HTTP transport satisfies the Phase 3C slice-1 acceptance criteria and the remaining gate checks for repo-level evidence and test discovery.
+
+## Phase 3D prerequisite sanitizer rerun
+
+Ran on 2026-10-17 before Phase 3D changes:
+
+```text
+$ timeout 600 ctest --test-dir build-san-address-undefined --output-on-failure
+100% tests passed, 0 tests failed out of 52
+Total Test time: 8.57 sec
+
+$ timeout 600 ctest --test-dir build-san-thread --output-on-failure
+100% tests passed, 0 tests failed out of 52
+Total Test time: 7.69 sec
+```
+
+Both existing Phase 3C sanitizer builds completed all 52 tests. The test runs
+reported no AddressSanitizer, UndefinedBehaviorSanitizer, or ThreadSanitizer
+diagnostics.

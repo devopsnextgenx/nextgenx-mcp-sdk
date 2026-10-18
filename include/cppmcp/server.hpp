@@ -29,7 +29,7 @@ struct ServerInfo {
 
 struct ToolAnnotation {
     bool read_only_hint = false;
-    bool destructive_hint = true;
+    bool destructive_hint = false;
     bool idempotent_hint = true;
     bool open_world_hint = false;
 };

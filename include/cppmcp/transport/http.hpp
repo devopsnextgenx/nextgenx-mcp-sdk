@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,6 +15,37 @@
 namespace cppmcp::transport {
 
 using Headers = std::vector<std::pair<std::string, std::string>>;
+
+struct SseEvent {
+    std::string event = "message";
+    std::string data;
+    std::string last_event_id;
+    std::optional<std::chrono::milliseconds> retry;
+};
+
+class SseParser {
+public:
+    explicit SseParser(std::size_t max_event_bytes = 1024 * 1024);
+
+    std::vector<SseEvent> feed(std::string_view bytes);
+    void reset();
+
+private:
+    void consume_byte(char byte, std::vector<SseEvent>& events);
+    void consume_line(std::vector<SseEvent>& events);
+
+    std::size_t max_event_bytes_;
+    std::size_t event_bytes_ = 0;
+    std::string bom_prefix_;
+    std::string line_;
+    std::string data_;
+    std::string event_type_;
+    std::string last_event_id_;
+    std::optional<std::chrono::milliseconds> retry_;
+    bool bom_complete_ = false;
+    bool skip_lf_ = false;
+    bool has_data_ = false;
+};
 
 struct PeerInfo {
     std::string remote_address;
@@ -80,6 +112,7 @@ struct HttpOptions {
     std::chrono::milliseconds body_timeout{10000};
     std::chrono::milliseconds idle_timeout{30000};
     std::chrono::milliseconds sse_keep_alive_interval{15000};
+    std::chrono::milliseconds notify_interval{0};
 };
 
 class McpHttpHandler {

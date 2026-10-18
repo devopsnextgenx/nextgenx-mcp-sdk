@@ -19,9 +19,13 @@ void add_tools(cppmcp::Server& server) {
         .name = "echo",
         .title = "Echo",
         .description = "Return the supplied value.",
-        .input_schema = Json{{"type", "object"}},
+        .input_schema = Json{
+            {"type", "object"},
+            {"properties", {{"value", {{"description", "The value to return unchanged."}}}}},
+            {"required", Json::array({"value"})},
+            {"additionalProperties", false}},
         .output_schema = Json::object(),
-        .annotations = cppmcp::ToolAnnotation{},
+        .annotations = cppmcp::ToolAnnotation{.read_only_hint = true},
         .meta = Json::object(),
         .handler = [](const Json& args, const Json&) {
             return args.value("value", Json(nullptr));
@@ -31,9 +35,14 @@ void add_tools(cppmcp::Server& server) {
         .name = "add",
         .title = "Add",
         .description = "Add two numbers.",
-        .input_schema = Json{{"type", "object"}},
+        .input_schema = Json{
+            {"type", "object"},
+            {"properties", {{"a", {{"type", "number"}, {"description", "First addend."}}},
+                            {"b", {{"type", "number"}, {"description", "Second addend."}}}}},
+            {"required", Json::array({"a", "b"})},
+            {"additionalProperties", false}},
         .output_schema = Json::object(),
-        .annotations = cppmcp::ToolAnnotation{},
+        .annotations = cppmcp::ToolAnnotation{.read_only_hint = true},
         .meta = Json::object(),
         .handler = [](const Json& args, const Json&) {
             const auto a = args.value("a", 0.0);
@@ -45,7 +54,15 @@ void add_tools(cppmcp::Server& server) {
         .name = "slow_count",
         .title = "Slow count",
         .description = "Wait between counting steps.",
-        .input_schema = Json{{"type", "object"}},
+        .input_schema = Json{
+            {"type", "object"},
+            {"properties", {{"count", {{"type", "integer"},
+                                       {"minimum", 0},
+                                       {"description", "Number of steps (default: 5)."}}},
+                            {"delay_ms", {{"type", "integer"},
+                                          {"minimum", 0},
+                                          {"description", "Delay between steps in milliseconds (default: 10)."}}}}},
+            {"additionalProperties", false}},
         .output_schema = Json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = Json::object(),
@@ -73,7 +90,12 @@ void add_tools(cppmcp::Server& server) {
         .name = "emit_demo",
         .title = "Emission demo",
         .description = "Return a simple result for the SSE demonstration.",
-        .input_schema = Json{{"type", "object"}},
+        .input_schema = Json{
+            {"type", "object"},
+            {"properties", {{"count", {{"type", "integer"},
+                                       {"minimum", 0},
+                                       {"description", "Number of progress events (default: 3)."}}}}},
+            {"additionalProperties", false}},
         .output_schema = Json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = Json::object(),
@@ -94,7 +116,9 @@ void add_tools(cppmcp::Server& server) {
         .input_schema = Json{
             {"type", "object"},
             {"properties", {{"city", {{"type", "string"},
-                                      {"description", "City for the report."}}}}}},
+                                      {"description", "City for the report."}}}}},
+            {"required", Json::array({"city"})},
+            {"additionalProperties", false}},
         .output_schema = Json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = Json::object(),
@@ -153,6 +177,8 @@ int main(int argc, char** argv) {
                 options.handler.mode = options.mode;
             } else if (argument == "--ping-interval-ms" && i + 1 < argc) {
                 options.handler.ping_interval = parse_ping_interval_ms(argv[++i]);
+            } else if (argument == "--notify-interval-ms" && i + 1 < argc) {
+                options.notify_interval = parse_ping_interval_ms(argv[++i]);
             } else if (argument == "--allow-non-loopback") {
                 options.allow_non_loopback = true;
             } else if (argument == "--json-only") {

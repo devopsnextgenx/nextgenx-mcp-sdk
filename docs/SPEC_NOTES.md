@@ -184,8 +184,86 @@ specification's text representation, and requires exactly one matching header
 when the property is supplied (and for required properties). Mirrored integer
 values are restricted to JavaScript's safe integer range.
 
-The delivered HTTP transport includes the Asio/llhttp socket listener, JSON
-responses, request-scoped SSE, cancellation on disconnect, hardening and
-authentication/route seams. It does not implement `subscriptions/listen`,
-TLS, legacy HTTP sessions, or an HTTP client; those behaviors must not be
-inferred from either the socket-free handler or the network adapter.
+The original Phase 3B HTTP server included the Asio/llhttp socket listener,
+JSON responses, request-scoped SSE, cancellation on disconnect, hardening and
+authentication/route seams. Phase 3D adds the plain-HTTP client and the
+incremental SSE parser. `subscriptions/listen`, TLS, legacy GET-stream
+notifications, and reconnecting client subscriptions remain unimplemented
+until their respective slices pass.
+
+## Phase 3D transport and subscriptions review (2026-10-17)
+
+The 2026-07-28 Streamable HTTP and Subscriptions pages, and the 2025-11-25 and
+2025-03-26 transport overviews were re-read alongside
+`schema/2026-07-28/schema.json`. The versioned Streamable HTTP pages for 2025
+are contained in their respective transport overview pages; the split
+`/streamable-http` URLs are not published for those versions.
+
+The 2026-07-28 Streamable HTTP page says:
+
+> “Every JSON-RPC message sent from the client MUST be a new HTTP POST request
+> to the MCP endpoint.”
+
+> “The client MUST include an `Accept` header listing both
+> `application/json` and `text/event-stream` as supported content types.”
+
+> “If the body is a JSON-RPC request, the server MUST return either
+> `Content-Type: application/json` (a single JSON object) or
+> `Content-Type: text/event-stream` (an SSE response stream). The client MUST
+> support both.”
+
+The same page says:
+
+> “Long-lived notification streams are obtained by sending a
+> [`subscriptions/listen`][subscriptions-listen] request.”
+
+> “Resumable SSE streams via `Last-Event-ID` are not supported.”
+
+The 2026-07-28 Subscriptions page says:
+
+> “The server MUST NOT send notification types the client has not explicitly
+> requested.”
+
+> “The server MUST send `notifications/subscriptions/acknowledged` as the first
+> message carrying the subscription's ID in `_meta` under
+> `io.modelcontextprotocol/subscriptionId`, and MUST NOT send any notification
+> on the subscription before it.”
+
+> “All notifications delivered on the stream carry
+> `io.modelcontextprotocol/subscriptionId` in `_meta`.”
+
+Its example acknowledgement contains `params._meta` with the subscription ID
+and `params.notifications` with the accepted subset. The schema confirms that
+`SubscriptionsListenRequest` requires `id`, `jsonrpc`, `method`, and `params`;
+`SubscriptionsListenRequestParams` requires both `_meta` and `notifications`;
+and `SubscriptionFilter` defines optional boolean fields
+`toolsListChanged`, `promptsListChanged`, and `resourcesListChanged`, plus an
+optional string-array `resourceSubscriptions`.
+
+The prompt says a listen stream “never” carries a JSON-RPC response. The
+normative Subscriptions page has a graceful-closure exception: the server
+SHOULD send a successful completion response for the original request before
+closing a subscription itself. Normal long-lived delivery is notification-only;
+graceful server-initiated closure must follow the specification.
+
+The 2026-07-28 transport page explicitly removes GET streams and
+protocol-level sessions. Those remain legacy behavior for earlier
+Streamable HTTP versions. The 2025 transport material must not be applied to
+modern requests.
+
+The earlier transport overviews state:
+
+> “This transport uses HTTP POST and GET requests.”
+
+The 2025-11-25 transport additionally says:
+
+> “The client MUST respect the `retry` field, waiting the given number of
+> milliseconds before attempting to reconnect.”
+
+> “If the client wishes to resume after a disconnection (whether due to network failure
+> or server-initiated closure), it SHOULD issue an HTTP GET to the MCP endpoint,
+> and include the `Last-Event-ID` header to indicate the last event ID it received.”
+
+These are versioned legacy rules, not modern requirements. In particular,
+legacy resumption and retry handling must remain separate from modern listen
+streams, which do not support `Last-Event-ID`.

@@ -94,3 +94,16 @@
   parsing. The Linux CI job runs bounded fuzz smoke tests and an HTTP
   performance smoke; neither is a throughput benchmark or a proof of
   unbounded fuzz coverage.
+
+## Phase 3D HTTP client foundation
+
+- The HTTP client lives in `cppmcp::transport_http` and uses Asio plus llhttp
+  response parsing. It negotiates the stateless 2026 protocol first, with an
+  explicit modern-only or legacy-only policy and a legacy initialize fallback
+  in prefer-modern mode.
+- HTTP client authentication is a provider seam. The built-in static bearer
+  provider attaches credentials only to request headers; challenge details
+  are represented separately from token material.
+- SSE parsing is incremental and has a configurable event-byte ceiling.
+  Incomplete trailing events at end-of-stream are discarded in accordance
+  with the event-stream parsing model.

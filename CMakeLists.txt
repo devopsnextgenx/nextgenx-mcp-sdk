@@ -65,7 +65,9 @@ set(CPPMCP_TRANSPORT_STDIO_SOURCES
 
 set(CPPMCP_TRANSPORT_HTTP_SOURCES
     src/http_handler.cpp
+    src/http_client.cpp
     src/http_server.cpp
+    src/sse_parser.cpp
 )
 
 function(cppmcp_configure_warnings target)
@@ -132,7 +134,7 @@ if(CPPMCP_BUILD_STATIC)
     add_library(cppmcp::transport_http ALIAS cppmcp_transport_http)
     cppmcp_configure_library(cppmcp_transport_http)
     set_target_properties(cppmcp_transport_http PROPERTIES EXPORT_NAME transport_http)
-    target_link_libraries(cppmcp_transport_http PUBLIC cppmcp_server cppmcp_core)
+    target_link_libraries(cppmcp_transport_http PUBLIC cppmcp_server cppmcp_client cppmcp_core)
     target_sources(cppmcp_transport_http PRIVATE $<TARGET_OBJECTS:cppmcp_llhttp>)
     target_include_directories(cppmcp_transport_http SYSTEM PRIVATE
         ${llhttp_SOURCE_DIR}/include
@@ -249,6 +251,11 @@ target_link_libraries(cppmcp_http_server PRIVATE cppmcp::server cppmcp::transpor
 target_compile_features(cppmcp_http_server PRIVATE cxx_std_20)
 cppmcp_configure_warnings(cppmcp_http_server)
 
+add_executable(cppmcp_http_client examples/http_client/main.cpp)
+target_link_libraries(cppmcp_http_client PRIVATE cppmcp::client cppmcp::transport_http)
+target_compile_features(cppmcp_http_client PRIVATE cxx_std_20)
+cppmcp_configure_warnings(cppmcp_http_client)
+
 if(CPPMCP_BUILD_TESTS)
     enable_testing()
     add_executable(cppmcp_core_tests
@@ -260,6 +267,8 @@ if(CPPMCP_BUILD_TESTS)
         tests/http_handler_test.cpp
         tests/http_server_test.cpp
         tests/cancellation_test.cpp
+        tests/sse_parser_test.cpp
+        tests/www_auth_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio cppmcp::transport_http)
@@ -295,7 +304,7 @@ if(CPPMCP_BUILD_TESTS)
             session_identity dual_mode_legacy dual_mode_modern dual_mode_header_isolation
             dual_mode_runtime dual_mode_server_compat ttl_cache_scope ttl_server_window
             ttl_probe ttl_freshness expiry_reconnect expiry_cleanup expiry_session_timer
-            expiry_legacy_timeout expiry_lifecycle expiry_guard)
+            expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
 endif()

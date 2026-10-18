@@ -58,6 +58,8 @@ void test_expiry_session_timer();
 void test_expiry_legacy_timeout();
 void test_expiry_lifecycle();
 void test_expiry_guard();
+void test_sse_parser();
+void test_www_auth();
 
 namespace {
 
@@ -150,6 +152,8 @@ int main(int argc, char** argv) {
     run_selected("expiry_legacy_timeout", test_expiry_legacy_timeout);
     run_selected("expiry_lifecycle", test_expiry_lifecycle);
     run_selected("expiry_guard", test_expiry_guard);
+    run_selected("sse_parser", test_sse_parser);
+    run_selected("www_auth", test_www_auth);
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;

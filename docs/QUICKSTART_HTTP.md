@@ -126,6 +126,24 @@ unauthenticated listener to an untrusted network.
 
 ## MCP clients
 
+Build and use the bundled HTTP client against modern, legacy, or dual-mode
+servers:
+
+```sh
+cmake --build build --target cppmcp_http_client
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp --mode auto
+```
+
+`--mode modern` requires `server/discover`, `--mode legacy` requires a
+session-based legacy server, and `--mode auto` probes modern before falling
+back to legacy. The client lists tools and calls `add`. To use a bearer token,
+pass `--token "$TOKEN"`; it is sent in the `Authorization` header and is not
+printed by the client:
+
+```sh
+./build/cppmcp_http_client --url "$URL" --mode auto --token "$TOKEN"
+```
+
 With Claude Code installed, add the running endpoint:
 
 ```sh

@@ -10,14 +10,9 @@
 #include "cppmcp/core/connection.hpp"
 #include "cppmcp/core/transport.hpp"
 #include "cppmcp/server.hpp"
+#include "cppmcp/transport/http_client.hpp"
 
 namespace cppmcp {
-
-enum class NegotiationPolicy {
-    prefer_modern,
-    modern_only,
-    legacy_only,
-};
 
 struct ClientInfo {
     std::string name;
@@ -31,8 +26,10 @@ public:
            NegotiationPolicy policy = NegotiationPolicy::prefer_modern);
 
     void connect(std::shared_ptr<cppmcp::core::ITransport> transport);
+    void connect_http(HttpClientOptions options);
     void close();
     void cancel(const cppmcp::core::RequestId& request_id);
+    [[nodiscard]] std::string http_mode() const;
 
     nlohmann::json discover();
     nlohmann::json list_tools();
