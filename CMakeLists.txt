@@ -237,7 +237,9 @@ if(CPPMCP_BUILD_TESTS)
     foreach(test_name IN ITEMS
             json_rpc versions schema_contract phase2_memory phase2_stdio
             http_handler cancellation http_server_methods http_server_host_origin
-            http_server_smuggling http_server_slowloris http_server_auth_route_bind)
+            http_server_smuggling http_server_slowloris http_server_auth_route_bind
+            http_server_sse_framing http_server_response_modes http_server_sse_keepalive
+            http_server_slow_consumer http_server_disconnect_cancel http_server_sse_soak)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
 endif()

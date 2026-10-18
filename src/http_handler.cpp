@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cmath>
 #include <optional>
+#include <stop_token>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -411,8 +412,14 @@ bool is_supported_method(std::string_view method) {
 }
 
 void send_response(IHttpExchange& exchange, const HttpHandlerOptions& options,
-                   bool accept_json, bool accept_sse, const Message& message) {
+                   bool accept_json, bool accept_sse, const Message& message,
+                   SseStream* stream = nullptr) {
     const auto json = core::serialize_message(message);
+    if (stream != nullptr) {
+        stream->write_event(json);
+        stream->close();
+        return;
+    }
     const bool use_sse = options.response_mode == HttpResponseMode::sse_only ||
                          (options.response_mode == HttpResponseMode::automatic &&
                           !accept_json && accept_sse);
@@ -612,13 +619,38 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         return;
     }
 
-    auto response = server_.handle_message(message);
+    auto cancellation = std::make_shared<std::stop_source>();
+    exchange->on_disconnect([cancellation] { cancellation->request_stop(); });
+    SseStream* stream = nullptr;
+    const auto start_sse = [&]() -> SseStream& {
+        if (stream == nullptr) {
+            stream = &exchange->begin_sse(
+                200, {{"Content-Type", "text/event-stream"},
+                      {"Cache-Control", "no-cache"},
+                      {"X-Accel-Buffering", "no"}});
+        }
+        return *stream;
+    };
+    if (options_.response_mode == HttpResponseMode::sse_only) {
+        start_sse();
+    }
+    const bool can_emit_sse = options_.response_mode != HttpResponseMode::json_only &&
+                              accept_sse;
+    ToolContext context(
+        cancellation->get_token(),
+        [&](Json event) {
+            if (!can_emit_sse) {
+                throw std::logic_error("request does not accept streamed tool emissions");
+            }
+            start_sse().write_event(event.dump());
+        });
+    auto response = server_.handle_message(message, &context);
     if (rpc_request.method == "server/discover") {
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {
             result->result["protocolVersions"] = Json::array({"2026-07-28"});
         }
     }
-    send_response(*exchange, options_, accept_json, accept_sse, response);
+    send_response(*exchange, options_, accept_json, accept_sse, response, stream);
 }
 
 std::string encode_mirrored_header_value(std::string_view value) {

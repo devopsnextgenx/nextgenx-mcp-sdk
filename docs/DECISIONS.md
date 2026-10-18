@@ -37,17 +37,17 @@
 
 ## HTTP handler foundation
 
-- The first HTTP slice is a socket-free `McpHttpHandler` linked as
-  `cppmcp::transport_http`. An embedding HTTP stack supplies each exchange;
-  network I/O, HTTP parsing, TLS, connection limits, and timeout enforcement
-  belong to a later adapter and are not implied by this target.
+- The socket-free `McpHttpHandler` remains linked as `cppmcp::transport_http`
+  for embedding. The same target also contains the Asio/llhttp network adapter,
+  which supplies real exchanges to that handler.
 - This handler implements the 2026-07-28 request shape only. Legacy session
   behavior is kept separate because the current revision removed both GET
   streams and protocol sessions.
-- `automatic` response mode returns JSON unless only SSE is acceptable;
-  `json_only` and `sse_only` enforce their corresponding Accept type. The
-  current server dispatch is synchronous, so this slice streams only a final
-  response, not progress or logging notifications.
+- `automatic` response mode returns JSON unless only SSE is acceptable, or a
+  tool emits a request-scoped event, in which case the response switches to
+  SSE. `json_only` rejects emissions through the tool context; `sse_only`
+  starts an SSE response before dispatch. Final JSON-RPC responses are SSE
+  `data:` events when the stream has started.
 - The `ITransport` cancellation default sends `notifications/cancelled`.
   Transports that close an individual response stream override the strategy
   and `cancel_request`; closing an entire client transport is not an acceptable

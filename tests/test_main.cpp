@@ -18,6 +18,12 @@ void test_http_server_host_origin();
 void test_http_server_smuggling();
 void test_http_server_slowloris();
 void test_http_server_auth_route_bind();
+void test_http_server_sse_framing();
+void test_http_server_response_modes();
+void test_http_server_sse_keepalive();
+void test_http_server_slow_consumer();
+void test_http_server_disconnect_cancel();
+void test_http_server_sse_soak();
 
 namespace {
 
@@ -68,6 +74,12 @@ int main(int argc, char** argv) {
     run_selected("http_server_smuggling", test_http_server_smuggling);
     run_selected("http_server_slowloris", test_http_server_slowloris);
     run_selected("http_server_auth_route_bind", test_http_server_auth_route_bind);
+    run_selected("http_server_sse_framing", test_http_server_sse_framing);
+    run_selected("http_server_response_modes", test_http_server_response_modes);
+    run_selected("http_server_sse_keepalive", test_http_server_sse_keepalive);
+    run_selected("http_server_slow_consumer", test_http_server_slow_consumer);
+    run_selected("http_server_disconnect_cancel", test_http_server_disconnect_cancel);
+    run_selected("http_server_sse_soak", test_http_server_sse_soak);
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;

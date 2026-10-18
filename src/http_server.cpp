@@ -12,8 +12,10 @@
 #include <chrono>
 #include <csignal>
 #include <cctype>
+#include <condition_variable>
 #include <exception>
 #include <mutex>
+#include <queue>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -133,6 +135,46 @@ llhttp_settings_t parser_settings() {
     return settings;
 }
 
+struct DisconnectWatch {
+    std::atomic<bool> stopped{false};
+    std::atomic<bool> notified{false};
+    std::function<void()> callback;
+};
+
+void notify_disconnect(const std::shared_ptr<DisconnectWatch>& watch) {
+    if (!watch->stopped.load(std::memory_order_acquire) &&
+        !watch->notified.exchange(true, std::memory_order_acq_rel) && watch->callback) {
+        watch->callback();
+    }
+}
+
+void watch_for_disconnect(const std::shared_ptr<Tcp::socket>& socket,
+                          const std::shared_ptr<DisconnectWatch>& watch) {
+    socket->async_wait(Tcp::socket::wait_read,
+                       [socket, watch](const asio::error_code& error) {
+        if (watch->stopped.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (error) {
+            if (error != asio::error::operation_aborted) {
+                notify_disconnect(watch);
+            }
+            return;
+        }
+        char byte = 0;
+        asio::error_code read_error;
+        const auto count = socket->receive(asio::buffer(&byte, 1),
+                                           Tcp::socket::message_peek, read_error);
+        if (read_error == asio::error::would_block ||
+            read_error == asio::error::try_again) {
+            watch_for_disconnect(socket, watch);
+            return;
+        }
+        (void)count;
+        notify_disconnect(watch);
+    });
+}
+
 std::string reason_phrase(int status) {
     switch (status) {
         case 200: return "OK";
@@ -153,8 +195,15 @@ std::string reason_phrase(int status) {
 
 class SocketSseStream final : public SseStream {
 public:
-    explicit SocketSseStream(std::function<void(std::string)> write)
-        : write_(std::move(write)) {}
+    SocketSseStream(std::shared_ptr<Tcp::socket> socket,
+                    std::shared_ptr<DisconnectWatch> disconnect_watch,
+                    std::size_t max_queue_bytes,
+                    std::chrono::milliseconds keep_alive_interval)
+        : socket_(std::move(socket)), disconnect_watch_(std::move(disconnect_watch)),
+          max_queue_bytes_(max_queue_bytes), keep_alive_interval_(keep_alive_interval),
+          writer_([this] { write_loop(); }) {}
+
+    ~SocketSseStream() override { close(); }
 
     void write_event(std::string_view data) override {
         std::string payload;
@@ -165,40 +214,137 @@ public:
             payload.append(data.substr(offset, end == std::string_view::npos
                                                    ? data.size() - offset
                                                    : end - offset));
-            payload += "\n";
+            payload += "\r\n";
             if (end == std::string_view::npos) {
                 break;
             }
             offset = end + 1;
         }
-        payload += "\n";
-        write_chunk(payload);
+        payload += "\r\n";
+        enqueue(make_chunk(payload));
     }
 
     void close() override {
-        if (!closed_) {
-            write_("0\r\n\r\n");
-            closed_ = true;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!closing_) {
+                closing_ = true;
+                cv_.notify_one();
+            }
+        }
+        if (writer_.joinable() && writer_.get_id() != std::this_thread::get_id()) {
+            writer_.join();
         }
     }
 
 private:
-    void write_chunk(const std::string& payload) {
+    static std::string make_chunk(const std::string& payload) {
         std::ostringstream size;
         size << std::hex << payload.size() << "\r\n";
-        write_(size.str() + payload + "\r\n");
+        return size.str() + payload + "\r\n";
     }
 
-    std::function<void(std::string)> write_;
-    bool closed_ = false;
+    void enqueue(std::string bytes) {
+        bool overflow = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (closing_ || failed_) {
+                throw std::runtime_error("SSE stream is closed");
+            }
+            if (bytes.size() > max_queue_bytes_ -
+                                   std::min(max_queue_bytes_, queued_bytes_)) {
+                failed_ = true;
+                closing_ = true;
+                overflow = true;
+            } else {
+                queued_bytes_ += bytes.size();
+                queue_.push(std::move(bytes));
+            }
+        }
+        cv_.notify_one();
+        if (overflow) {
+            notify_disconnect(disconnect_watch_);
+            asio::error_code ignored;
+            socket_->shutdown(Tcp::socket::shutdown_both, ignored);
+            socket_->close(ignored);
+            throw std::runtime_error("SSE outbound queue limit exceeded");
+        }
+    }
+
+    bool write_bytes(const std::string& bytes) {
+        asio::error_code error;
+        asio::write(*socket_, asio::buffer(bytes), error);
+        if (error) {
+            CPPMCP_LOG_WARN("SSE response write failed: " << error.message());
+            failed_ = true;
+            notify_disconnect(disconnect_watch_);
+            return false;
+        }
+        return true;
+    }
+
+    void write_loop() {
+        for (;;) {
+            std::string bytes;
+            bool finish = false;
+            bool keep_alive = false;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                cv_.wait_for(lock, keep_alive_interval_,
+                             [this] { return !queue_.empty() || closing_ || failed_; });
+                if (failed_) {
+                    return;
+                }
+                if (!queue_.empty()) {
+                    bytes = std::move(queue_.front());
+                    queue_.pop();
+                    queued_bytes_ -= bytes.size();
+                } else if (closing_) {
+                    finish = true;
+                } else {
+                    keep_alive = true;
+                }
+            }
+            if (finish) {
+                write_bytes("0\r\n\r\n");
+                return;
+            }
+            if (keep_alive) {
+                bytes = make_chunk(": keep-alive\r\n\r\n");
+            }
+            if (!write_bytes(bytes)) {
+                return;
+            }
+        }
+    }
+
+    std::shared_ptr<Tcp::socket> socket_;
+    std::shared_ptr<DisconnectWatch> disconnect_watch_;
+    const std::size_t max_queue_bytes_;
+    const std::chrono::milliseconds keep_alive_interval_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::queue<std::string> queue_;
+    std::size_t queued_bytes_ = 0;
+    bool closing_ = false;
+    std::atomic<bool> failed_{false};
+    std::thread writer_;
 };
 
 class SocketExchange final : public IHttpExchange {
 public:
     SocketExchange(std::shared_ptr<Tcp::socket> socket, HttpRequest request,
-                   bool keep_alive)
+                   bool keep_alive, const HttpOptions& options)
         : socket_(std::move(socket)), request_(std::move(request)),
-          keep_alive_(keep_alive) {}
+          keep_alive_(keep_alive), options_(options) {}
+
+    ~SocketExchange() override {
+        if (disconnect_watch_) {
+            disconnect_watch_->stopped.store(true, std::memory_order_release);
+            asio::error_code ignored;
+            socket_->cancel(ignored);
+        }
+    }
 
     const HttpRequest& request() const override { return request_; }
 
@@ -234,28 +380,35 @@ public:
         response += "\r\n";
         write(std::move(response));
         stream_ = std::make_unique<SocketSseStream>(
-            [this](std::string bytes) { write(std::move(bytes)); });
+            socket_, disconnect_watch_, options_.sse_queue_max_bytes,
+            options_.sse_keep_alive_interval);
         return *stream_;
     }
 
     void on_disconnect(std::function<void()> callback) override {
-        disconnect_callback_ = std::move(callback);
+        disconnect_watch_ = std::make_shared<DisconnectWatch>();
+        disconnect_watch_->callback = std::move(callback);
+        watch_for_disconnect(socket_, disconnect_watch_);
     }
 
 private:
     void write(std::string bytes) {
         asio::error_code error;
         asio::write(*socket_, asio::buffer(bytes), error);
-        if (error && disconnect_callback_) {
-            disconnect_callback_();
+        if (error) {
+            CPPMCP_LOG_WARN("HTTP response write failed: " << error.message());
+            if (disconnect_watch_) {
+                notify_disconnect(disconnect_watch_);
+            }
         }
     }
 
     std::shared_ptr<Tcp::socket> socket_;
     HttpRequest request_;
     bool keep_alive_;
+    const HttpOptions& options_;
     bool responded_ = false;
-    std::function<void()> disconnect_callback_;
+    std::shared_ptr<DisconnectWatch> disconnect_watch_;
     std::unique_ptr<SocketSseStream> stream_;
 };
 
@@ -365,7 +518,7 @@ void serve_connection(const std::shared_ptr<Tcp::socket>& socket,
             }
         }
         auto exchange = std::make_shared<SocketExchange>(socket, std::move(state.request),
-                                                          keep_alive);
+                                                          keep_alive, options);
         socket->non_blocking(false);
         try {
             std::vector<std::string_view> authorization;
@@ -450,8 +603,10 @@ struct HttpServerHandle::Impl {
                 "non-loopback HTTP bind requires allow_non_loopback=true");
         }
         if (options.max_header_bytes == 0 || options.max_body_bytes == 0 ||
+            options.sse_queue_max_bytes == 0 ||
             options.header_timeout.count() <= 0 || options.body_timeout.count() <= 0 ||
-            options.idle_timeout.count() <= 0) {
+            options.idle_timeout.count() <= 0 ||
+            options.sse_keep_alive_interval.count() <= 0) {
             throw std::invalid_argument("HTTP limits and timeouts must be positive");
         }
         Tcp::endpoint endpoint(address, options.port);
@@ -461,6 +616,7 @@ struct HttpServerHandle::Impl {
         acceptor.listen();
         acceptor.non_blocking(true);
         bound_port = acceptor.local_endpoint().port();
+        context_thread = std::thread([this] { context.run(); });
         accept_thread = std::thread([this] { accept_loop(); });
     }
 
@@ -472,19 +628,44 @@ struct HttpServerHandle::Impl {
             asio::error_code error;
             acceptor.accept(*socket, error);
             if (!error) {
-                std::lock_guard<std::mutex> lock(workers_mutex);
-                if (stopping.load(std::memory_order_acquire)) {
-                    socket->close(error);
-                    break;
+                {
+                    std::lock_guard<std::mutex> lock(workers_mutex);
+                    if (stopping.load(std::memory_order_acquire)) {
+                        socket->close(error);
+                        break;
+                    }
+                    active_sockets.push_back(socket);
+                    ++active_connections;
                 }
-                active_sockets.push_back(socket);
-                workers.emplace_back([this, socket] {
-                    serve_connection(socket, handler, options);
-                    std::lock_guard<std::mutex> worker_lock(workers_mutex);
+                try {
+                    std::thread([this, socket] {
+                        try {
+                            serve_connection(socket, handler, options);
+                        } catch (const std::exception& error) {
+                            CPPMCP_LOG_ERROR("HTTP connection failed: " << error.what());
+                            asio::error_code ignored;
+                            socket->close(ignored);
+                        }
+                        {
+                            std::lock_guard<std::mutex> worker_lock(workers_mutex);
+                            active_sockets.erase(
+                                std::remove(active_sockets.begin(), active_sockets.end(), socket),
+                                active_sockets.end());
+                            --active_connections;
+                        }
+                        workers_cv.notify_all();
+                    }).detach();
+                } catch (const std::exception& error) {
+                    CPPMCP_LOG_ERROR("could not start HTTP connection worker: " << error.what());
+                    asio::error_code ignored;
+                    socket->close(ignored);
+                    std::lock_guard<std::mutex> lock(workers_mutex);
                     active_sockets.erase(
                         std::remove(active_sockets.begin(), active_sockets.end(), socket),
                         active_sockets.end());
-                });
+                    --active_connections;
+                    workers_cv.notify_all();
+                }
             } else if (error == asio::error::would_block ||
                        error == asio::error::try_again) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -511,23 +692,30 @@ struct HttpServerHandle::Impl {
         if (accept_thread.joinable()) {
             accept_thread.join();
         }
-        for (auto& worker : workers) {
-            if (worker.joinable()) {
-                worker.join();
-            }
+        {
+            std::unique_lock<std::mutex> lock(workers_mutex);
+            workers_cv.wait(lock, [this] { return active_connections == 0; });
         }
-        workers.clear();
         active_sockets.clear();
+        work_guard.reset();
+        context.stop();
+        if (context_thread.joinable()) {
+            context_thread.join();
+        }
     }
 
     asio::io_context context;
+    std::optional<asio::executor_work_guard<asio::io_context::executor_type>> work_guard{
+        asio::make_work_guard(context)};
     HttpOptions options;
     McpHttpHandler handler;
     Tcp::acceptor acceptor;
     std::atomic<bool> stopping{false};
     std::thread accept_thread;
+    std::thread context_thread;
     std::mutex workers_mutex;
-    std::vector<std::thread> workers;
+    std::condition_variable workers_cv;
+    std::size_t active_connections = 0;
     std::vector<std::shared_ptr<Tcp::socket>> active_sockets;
     unsigned short bound_port = 0;
 };

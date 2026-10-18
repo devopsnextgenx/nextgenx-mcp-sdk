@@ -66,9 +66,11 @@ struct HttpOptions {
     std::function<std::optional<std::string>(const HttpRequest&)> route;
     std::size_t max_header_bytes = 32 * 1024;
     std::size_t max_body_bytes = 16 * 1024 * 1024;
+    std::size_t sse_queue_max_bytes = 1024 * 1024;
     std::chrono::milliseconds header_timeout{5000};
     std::chrono::milliseconds body_timeout{10000};
     std::chrono::milliseconds idle_timeout{30000};
+    std::chrono::milliseconds sse_keep_alive_interval{15000};
 };
 
 class McpHttpHandler {

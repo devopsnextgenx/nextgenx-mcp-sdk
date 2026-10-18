@@ -1,6 +1,7 @@
 #include "cppmcp/server.hpp"
 
 #include <exception>
+#include <stdexcept>
 
 #include "cppmcp/core/log.hpp"
 
@@ -37,9 +38,39 @@ core::Json tool_payload(const ToolDefinition& tool) {
 
 Server::Server(ServerInfo info) : info_(std::move(info)) {}
 
+ToolContext::ToolContext(std::stop_token cancellation,
+                         std::function<void(nlohmann::json)> emitter)
+    : cancellation_(cancellation), emitter_(std::move(emitter)) {}
+
+void ToolContext::emit(nlohmann::json event) const {
+    if (!emitter_) {
+        throw std::logic_error("request context does not support emissions");
+    }
+    emitter_(std::move(event));
+}
+
+bool ToolContext::cancelled() const noexcept {
+    return cancellation_.stop_requested();
+}
+
+std::stop_token ToolContext::cancellation_token() const noexcept {
+    return cancellation_;
+}
+
 void Server::add_tool(ToolDefinition tool) {
     std::lock_guard<std::mutex> lock(mutex_);
     CPPMCP_LOG_DEBUG("registering tool '" << tool.name << "'");
+    context_handlers_.erase(tool.name);
+    tools_[tool.name] = std::move(tool);
+}
+
+void Server::add_tool(ToolDefinition tool, ContextToolHandler context_handler) {
+    if (!context_handler) {
+        throw std::invalid_argument("context tool handler must not be empty");
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    CPPMCP_LOG_DEBUG("registering context tool '" << tool.name << "'");
+    context_handlers_[tool.name] = std::move(context_handler);
     tools_[tool.name] = std::move(tool);
 }
 
@@ -89,7 +120,7 @@ core::Message Server::handle_notification(const core::Notification& notification
                              "Notification method not implemented")};
 }
 
-core::Message Server::handle_request(const core::Request& request) {
+core::Message Server::handle_request(const core::Request& request, ToolContext* context) {
     const auto method = request.method;
     const auto version = request_protocol_version(request.params);
     CPPMCP_LOG_DEBUG("request method=" << method << " protocolVersion='" << version << "'");
@@ -138,6 +169,7 @@ core::Message Server::handle_request(const core::Request& request) {
         // Copy the handler out so the server mutex is not held while user code runs
         // (a handler that calls add_tool(), or a slow one, must not block the server).
         decltype(ToolDefinition::handler) handler;
+        ContextToolHandler context_handler;
         bool found = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -145,6 +177,10 @@ core::Message Server::handle_request(const core::Request& request) {
             if (it != tools_.end()) {
                 found = true;
                 handler = it->second.handler;
+                const auto contextual = context_handlers_.find(name);
+                if (contextual != context_handlers_.end()) {
+                    context_handler = contextual->second;
+                }
             }
         }
         if (!found) {
@@ -166,8 +202,14 @@ core::Message Server::handle_request(const core::Request& request) {
         CPPMCP_LOG_DEBUG("calling tool '" << name << "'");
         nlohmann::json result;
         try {
-            result = handler(request.params.value("arguments", nlohmann::json::object()),
-                             request.params);
+            const auto arguments = request.params.value("arguments", nlohmann::json::object());
+            if (context_handler) {
+                ToolContext fallback;
+                result = context_handler(arguments, request.params,
+                                         context == nullptr ? fallback : *context);
+            } else {
+                result = handler(arguments, request.params);
+            }
         } catch (const std::exception& error) {
             CPPMCP_LOG_ERROR("tool '" << name << "' threw: " << error.what());
             nlohmann::json content = nlohmann::json::array();
@@ -204,12 +246,12 @@ core::Message Server::handle_request(const core::Request& request) {
                                                    "Unknown method")};
 }
 
-core::Message Server::handle_message(const core::Message& message) {
+core::Message Server::handle_message(const core::Message& message, ToolContext* context) {
     return std::visit(
-        [this](const auto& value) -> core::Message {
+        [this, context](const auto& value) -> core::Message {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, core::Request>) {
-                return handle_request(value);
+                return handle_request(value, context);
             } else if constexpr (std::is_same_v<T, core::Notification>) {
                 return handle_notification(value);
             } else {

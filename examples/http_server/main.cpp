@@ -2,6 +2,7 @@
 #include "cppmcp/transport/http.hpp"
 #include "cppmcp/transport/http_server.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -48,14 +49,25 @@ void add_tools(cppmcp::Server& server) {
         .output_schema = Json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = Json::object(),
-        .handler = [](const Json& args, const Json&) {
-            const auto count = args.value("count", 5);
-            const auto delay = args.value("delay_ms", 10);
-            for (int i = 0; i < count; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        .handler = {},
+    }, [](const Json& args, const Json&, cppmcp::ToolContext& context) {
+        const auto count = args.value("count", 5);
+        const auto delay = args.value("delay_ms", 10);
+        for (int i = 1; i <= count; ++i) {
+            const auto step_delay = std::chrono::milliseconds(10);
+            for (auto elapsed = std::chrono::milliseconds(0);
+                 elapsed < std::chrono::milliseconds(delay); elapsed += step_delay) {
+                if (context.cancelled()) {
+                    return Json{{"count", i - 1}, {"cancelled", true}};
+                }
+                std::this_thread::sleep_for(std::min(
+                    step_delay, std::chrono::milliseconds(delay) - elapsed));
             }
-            return Json{{"count", count}};
-        },
+            if (context.cancellation_token().stop_possible()) {
+                context.emit(Json{{"type", "progress"}, {"count", i}, {"total", count}});
+            }
+        }
+        return Json{{"count", count}};
     });
     server.add_tool({
         .name = "emit_demo",
@@ -65,9 +77,15 @@ void add_tools(cppmcp::Server& server) {
         .output_schema = Json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = Json::object(),
-        .handler = [](const Json& args, const Json&) {
-            return Json{{"count", args.value("count", 3)}};
-        },
+        .handler = {},
+    }, [](const Json& args, const Json&, cppmcp::ToolContext& context) {
+        const auto count = args.value("count", 3);
+        for (int i = 1; i <= count; ++i) {
+            if (context.cancellation_token().stop_possible()) {
+                context.emit(Json{{"type", "progress"}, {"count", i}, {"total", count}});
+            }
+        }
+        return Json{{"count", count}};
     });
     server.add_tool({
         .name = "weather_like",

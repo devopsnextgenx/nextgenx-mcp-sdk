@@ -85,3 +85,19 @@ The `http_server` example exposes `echo`, `add`, `slow_count`, `emit_demo`, and
 The in-process `McpHttpHandler` remains available for applications that supply
 their own HTTP exchange adapter. TLS, `subscriptions/listen`, legacy HTTP
 sessions, and an HTTP client remain unimplemented.
+
+Tools that need request-scoped streaming or disconnect cancellation can use the
+context-handler overload of `Server::add_tool` and call `ToolContext::emit`:
+
+```cpp
+server.add_tool(tool_definition,
+    [](const nlohmann::json& args, const nlohmann::json&, cppmcp::ToolContext& ctx) {
+        ctx.emit({{"type", "progress"}, {"step", 1}});
+        return nlohmann::json{{"done", !ctx.cancelled()}};
+    });
+```
+
+In automatic response mode, the first emission starts chunked SSE; the final
+JSON-RPC result is sent as the last `data:` event. A disconnected peer requests
+stop through the context token. The outbound SSE queue is bounded and closes a
+slow consumer that exceeds its configured limit.

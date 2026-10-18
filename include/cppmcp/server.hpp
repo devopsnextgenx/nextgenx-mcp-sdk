@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <stop_token>
 #include <string>
 #include <vector>
 
@@ -44,6 +45,24 @@ struct ToolDefinition {
     std::function<nlohmann::json(const nlohmann::json&, const nlohmann::json&)> handler;
 };
 
+class ToolContext {
+public:
+    ToolContext() = default;
+    ToolContext(std::stop_token cancellation,
+                std::function<void(nlohmann::json)> emitter);
+
+    void emit(nlohmann::json event) const;
+    bool cancelled() const noexcept;
+    std::stop_token cancellation_token() const noexcept;
+
+private:
+    std::stop_token cancellation_;
+    std::function<void(nlohmann::json)> emitter_;
+};
+
+using ContextToolHandler =
+    std::function<nlohmann::json(const nlohmann::json&, const nlohmann::json&, ToolContext&)>;
+
 struct ToolResult {
     nlohmann::json payload;
     bool is_error = false;
@@ -64,12 +83,13 @@ public:
     explicit Server(ServerInfo info = {"cppmcp", "cppmcp", "0.1.0"});
 
     void add_tool(ToolDefinition tool);
+    void add_tool(ToolDefinition tool, ContextToolHandler context_handler);
     bool has_tool(const std::string& name) const;
     std::vector<ToolDefinition> tools() const;
 
     nlohmann::json discover() const;
-    core::Message handle_message(const core::Message& message);
-    core::Message handle_request(const core::Request& request);
+    core::Message handle_message(const core::Message& message, ToolContext* context = nullptr);
+    core::Message handle_request(const core::Request& request, ToolContext* context = nullptr);
     core::Message handle_notification(const core::Notification& notification);
 
     void run_http(const transport::HttpOptions& options);
@@ -82,6 +102,7 @@ private:
     mutable std::mutex mutex_;
     ServerInfo info_;
     std::map<std::string, ToolDefinition> tools_;
+    std::map<std::string, ContextToolHandler> context_handlers_;
 };
 
 }  // namespace cppmcp
