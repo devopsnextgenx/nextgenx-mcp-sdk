@@ -115,6 +115,28 @@ unsigned short parse_port(const std::string& value) {
     return static_cast<unsigned short>(parsed);
 }
 
+cppmcp::transport::HttpMode parse_mode(const std::string& value) {
+    if (value == "modern") {
+        return cppmcp::transport::HttpMode::modern;
+    }
+    if (value == "legacy") {
+        return cppmcp::transport::HttpMode::legacy;
+    }
+    if (value == "dual") {
+        return cppmcp::transport::HttpMode::dual;
+    }
+    throw std::invalid_argument("mode must be one of: modern, legacy, dual");
+}
+
+std::chrono::milliseconds parse_ping_interval_ms(const std::string& value) {
+    std::size_t consumed = 0;
+    const auto parsed = std::stoul(value, &consumed);
+    if (consumed != value.size() || parsed > std::numeric_limits<int>::max()) {
+        throw std::invalid_argument("ping interval must be an integer millisecond value");
+    }
+    return std::chrono::milliseconds(static_cast<int>(parsed));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -126,6 +148,11 @@ int main(int argc, char** argv) {
                 options.port = parse_port(argv[++i]);
             } else if (argument == "--bind" && i + 1 < argc) {
                 options.bind_address = argv[++i];
+            } else if (argument == "--mode" && i + 1 < argc) {
+                options.mode = parse_mode(argv[++i]);
+                options.handler.mode = options.mode;
+            } else if (argument == "--ping-interval-ms" && i + 1 < argc) {
+                options.handler.ping_interval = parse_ping_interval_ms(argv[++i]);
             } else if (argument == "--allow-non-loopback") {
                 options.allow_non_loopback = true;
             } else if (argument == "--json-only") {

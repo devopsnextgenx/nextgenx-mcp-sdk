@@ -38,6 +38,26 @@ void test_http_server_missing_param_header();
 void test_http_server_duplicate_param_header();
 void test_http_server_unexpected_param_header();
 void test_http_server_optional_param_header();
+void test_resumability_reconnect();
+void test_resumability_retry();
+void test_session_tracking();
+void test_session_revocation();
+void test_session_identity();
+void test_dual_mode_legacy();
+void test_dual_mode_modern();
+void test_dual_mode_header_isolation();
+void test_dual_mode_runtime();
+void test_dual_mode_server_compat();
+void test_ttl_cache_scope();
+void test_ttl_server_window();
+void test_ttl_probe();
+void test_ttl_freshness();
+void test_expiry_reconnect();
+void test_expiry_cleanup();
+void test_expiry_session_timer();
+void test_expiry_legacy_timeout();
+void test_expiry_lifecycle();
+void test_expiry_guard();
 
 namespace {
 
@@ -110,6 +130,26 @@ int main(int argc, char** argv) {
     run_selected("http_server_disconnect_cancel", test_http_server_disconnect_cancel);
     run_selected("http_server_sse_soak", test_http_server_sse_soak);
     run_selected("http_server_mcp_param_stateless", test_http_server_mcp_param_stateless);
+    run_selected("resumability_reconnect", test_resumability_reconnect);
+    run_selected("resumability_retry", test_resumability_retry);
+    run_selected("session_tracking", test_session_tracking);
+    run_selected("session_revocation", test_session_revocation);
+    run_selected("session_identity", test_session_identity);
+    run_selected("dual_mode_legacy", test_dual_mode_legacy);
+    run_selected("dual_mode_modern", test_dual_mode_modern);
+    run_selected("dual_mode_header_isolation", test_dual_mode_header_isolation);
+    run_selected("dual_mode_runtime", test_dual_mode_runtime);
+    run_selected("dual_mode_server_compat", test_dual_mode_server_compat);
+    run_selected("ttl_cache_scope", test_ttl_cache_scope);
+    run_selected("ttl_server_window", test_ttl_server_window);
+    run_selected("ttl_probe", test_ttl_probe);
+    run_selected("ttl_freshness", test_ttl_freshness);
+    run_selected("expiry_reconnect", test_expiry_reconnect);
+    run_selected("expiry_cleanup", test_expiry_cleanup);
+    run_selected("expiry_session_timer", test_expiry_session_timer);
+    run_selected("expiry_legacy_timeout", test_expiry_legacy_timeout);
+    run_selected("expiry_lifecycle", test_expiry_lifecycle);
+    run_selected("expiry_guard", test_expiry_guard);
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;

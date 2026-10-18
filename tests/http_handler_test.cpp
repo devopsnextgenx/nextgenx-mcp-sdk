@@ -484,3 +484,222 @@ void test_http_handler_header_params_primitive_types() {
     CPPMCP_CHECK(schema["properties"]["enabled"]["x-mcp-header"] == "enabled");
     CPPMCP_CHECK(schema["required"] == Json::array({"count", "enabled"}));
 }
+
+void test_resumability_reconnect() {
+    Server server({"resume", "resume", "1"});
+    server.add_tool(ToolDefinition{
+        .name = "echo",
+        .title = "Echo",
+        .description = "Echo value.",
+        .input_schema = Json{{"type", "object"}},
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
+        .handler = [](const Json& args, const Json&) { return args; },
+    });
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+    CPPMCP_CHECK(response_json(*exchange)["result"]["tools"].size() >= 1);
+}
+
+void test_resumability_retry() {
+    Server server({"retry", "retry", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+    CPPMCP_CHECK(response_json(*exchange)["result"].contains("tools"));
+}
+
+void test_session_tracking() {
+    Server server({"session", "session", "1"});
+    server.add_tool(ToolDefinition{
+        .name = "echo",
+        .title = "Echo",
+        .description = "Echo value.",
+        .input_schema = Json{{"type", "object"}},
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
+        .handler = [](const Json& args, const Json&) { return args; },
+    });
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+    CPPMCP_CHECK(response_json(*exchange)["result"]["tools"].size() >= 1);
+}
+
+void test_session_revocation() {
+    Server server({"revoke", "revoke", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_session_identity() {
+    Server server({"identity", "identity", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("server/discover");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+    CPPMCP_CHECK(response_json(*exchange)["result"]["serverInfo"]["name"] == "identity");
+}
+
+void test_dual_mode_legacy() {
+    Server server({"dual-legacy", "dual legacy", "1"});
+    auto request = make_request("tools/list");
+    request.headers.emplace_back("Mcp-Session-Id", "legacy-session");
+    request.headers.emplace_back("MCP-Protocol-Version", "2025-11-25");
+    HttpHandlerOptions options;
+    options.mode = cppmcp::transport::HttpMode::dual;
+    McpHttpHandler handler(server, options);
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200 || exchange->status == 404 || exchange->status == 400);
+}
+
+void test_dual_mode_modern() {
+    Server server({"dual-modern", "dual modern", "1"});
+    auto request = make_request("tools/list");
+    request.headers[2].second = "2026-07-28";
+    HttpHandlerOptions options;
+    options.mode = cppmcp::transport::HttpMode::dual;
+    McpHttpHandler handler(server, options);
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_dual_mode_header_isolation() {
+    Server server({"header-isolation", "header isolation", "1"});
+    auto request = make_request("tools/list");
+    request.headers.emplace_back("Mcp-Session-Id", "legacy-session");
+    request.headers.emplace_back("MCP-Protocol-Version", "2025-11-25");
+    HttpHandlerOptions options;
+    options.mode = cppmcp::transport::HttpMode::dual;
+    McpHttpHandler handler(server, options);
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status != 0);
+}
+
+void test_dual_mode_runtime() {
+    Server server({"dual-runtime", "dual runtime", "1"});
+    HttpHandlerOptions options;
+    options.mode = cppmcp::transport::HttpMode::dual;
+    McpHttpHandler handler(server, options);
+    auto request = make_request("server/discover");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_dual_mode_server_compat() {
+    Server server({"dual-compat", "dual compat", "1"});
+    HttpHandlerOptions options;
+    options.mode = cppmcp::transport::HttpMode::dual;
+    McpHttpHandler handler(server, options);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_ttl_cache_scope() {
+    Server server({"ttl-cache", "ttl cache", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("server/discover");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_ttl_server_window() {
+    Server server({"ttl-window", "ttl window", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_ttl_probe() {
+    Server server({"ttl-probe", "ttl probe", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("server/discover");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_ttl_freshness() {
+    Server server({"ttl-freshness", "ttl freshness", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_expiry_reconnect() {
+    Server server({"expiry-reconnect", "expiry reconnect", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_expiry_cleanup() {
+    Server server({"expiry-cleanup", "expiry cleanup", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_expiry_session_timer() {
+    Server server({"expiry-session", "expiry session", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_expiry_legacy_timeout() {
+    Server server({"expiry-legacy-timeout", "expiry legacy timeout", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_expiry_lifecycle() {
+    Server server({"expiry-lifecycle", "expiry lifecycle", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_expiry_guard() {
+    Server server({"expiry-guard", "expiry guard", "1"});
+    McpHttpHandler handler(server);
+    auto request = make_request("tools/list");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 200);
+}

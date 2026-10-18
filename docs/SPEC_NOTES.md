@@ -45,6 +45,9 @@ still current.
   are required and mirrored metadata must agree with the body. Modern SSE has
   no event IDs or replay / `Last-Event-ID` semantics; a lost request stream is
   retried as a new request with a new ID.
+- Legacy Streamable HTTP retains session-bearing setup and `Last-Event-ID`
+  semantics for resumed SSE streams, while the modern path is stateless and
+  cannot replay messages by event ID.
 - Cacheable list/read results carry `ttlMs` and `cacheScope`. Tool listing
   should be deterministic. `inputSchema` and `outputSchema` permit JSON Schema
   2020-12; reference resolution and composition must be bounded. `structuredContent`

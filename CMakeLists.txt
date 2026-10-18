@@ -290,7 +290,12 @@ if(CPPMCP_BUILD_TESTS)
             http_server_unexpected_param_header http_server_optional_param_header
             http_server_sse_framing http_server_response_modes http_server_sse_keepalive
             http_server_slow_consumer http_server_disconnect_cancel http_server_sse_soak
-            http_server_mcp_param_stateless)
+            http_server_mcp_param_stateless
+            resumability_reconnect resumability_retry session_tracking session_revocation
+            session_identity dual_mode_legacy dual_mode_modern dual_mode_header_isolation
+            dual_mode_runtime dual_mode_server_compat ttl_cache_scope ttl_server_window
+            ttl_probe ttl_freshness expiry_reconnect expiry_cleanup expiry_session_timer
+            expiry_legacy_timeout expiry_lifecycle expiry_guard)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
 endif()

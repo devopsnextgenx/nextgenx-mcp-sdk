@@ -49,9 +49,17 @@ enum class HttpResponseMode {
     sse_only,
 };
 
+enum class HttpMode {
+    modern,
+    legacy,
+    dual,
+};
+
 struct HttpHandlerOptions {
     std::string path = "/mcp";
+    HttpMode mode = HttpMode::dual;
     HttpResponseMode response_mode = HttpResponseMode::automatic;
+    std::chrono::milliseconds ping_interval{500};
     std::vector<std::string> allowed_origins;
     std::vector<std::string> allowed_hosts;
     std::function<bool(const HttpRequest&)> authenticator;
@@ -62,6 +70,7 @@ struct HttpOptions {
     unsigned short port = 8000;
     std::string bearer_token;
     bool allow_non_loopback = false;
+    HttpMode mode = HttpMode::dual;
     HttpHandlerOptions handler;
     std::function<std::optional<std::string>(const HttpRequest&)> route;
     std::size_t max_header_bytes = 32 * 1024;

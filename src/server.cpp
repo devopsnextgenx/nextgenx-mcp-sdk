@@ -264,7 +264,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     }
 
     if (method == "ping") {
-        return core::ResultResponse{request.id, {}};
+        return core::ResultResponse{request.id, core::Json::object()};
     }
 
     if (method == "tools/list") {

@@ -3,9 +3,13 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <map>
+#include <mutex>
 #include <optional>
+#include <random>
 #include <stop_token>
 #include <stdexcept>
 #include <string>
@@ -19,8 +23,109 @@ namespace {
 using Json = nlohmann::json;
 using core::ErrorCode;
 using core::Message;
+using core::Notification;
 using core::Request;
 using core::RpcError;
+
+struct LegacySession {
+    std::string id;
+    std::string protocol_version = "2025-03-26";
+    std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
+    bool active = true;
+};
+
+std::mutex& legacy_session_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::map<std::string, LegacySession>& legacy_sessions() {
+    static std::map<std::string, LegacySession> sessions;
+    return sessions;
+}
+
+std::string lower_ascii(std::string_view value);
+std::string_view trim(std::string_view value);
+std::vector<std::string_view> header_values(const Headers& headers, std::string_view name);
+double media_quality(std::string_view accept, std::string_view wanted);
+bool method_header_has_value(const Headers& headers);
+
+std::string generate_session_id() {
+    static const std::string alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    std::random_device rd;
+    std::mt19937_64 rng(rd());
+    std::uniform_int_distribution<std::size_t> dist(0, alphabet.size() - 1);
+    std::string result;
+    result.reserve(32);
+    for (std::size_t i = 0; i < 32; ++i) {
+        result.push_back(alphabet[dist(rng)]);
+    }
+    return result;
+}
+
+std::string legacy_protocol_error_message() {
+    return "This request is not a modern MCP request. Call initialize or send _meta.io.modelcontextprotocol.protocolVersion.";
+}
+
+bool is_legacy_protocol_version(std::string_view version) {
+    return version == "2025-11-25" || version == "2025-06-18" || version == "2025-03-26" ||
+           version == "2024-11-05";
+}
+
+bool is_modern_protocol_version(std::string_view version) {
+    return version == "2026-07-28";
+}
+
+[[maybe_unused]] bool needs_legacy_session(const HttpRequest& request) {
+    for (const auto& [name, value] : request.headers) {
+        if (lower_ascii(name) == "mcp-session-id") {
+            return true;
+        }
+    }
+    return false;
+}
+
+[[maybe_unused]] bool is_modern_request_body(const Request& request) {
+    const auto meta = request.params.find("_meta");
+    if (meta != request.params.end() && meta->is_object()) {
+        const auto version = meta->value("io.modelcontextprotocol/protocolVersion", Json{});
+        return version.is_string() && !version.get<std::string>().empty();
+    }
+    return request.method == "server/discover";
+}
+
+[[maybe_unused]] std::string request_jsonrpc_method(const std::string& body) {
+    const auto parsed = core::parse_message(body, false);
+    if (const auto* message = std::get_if<Message>(&parsed)) {
+        if (const auto* request = std::get_if<Request>(message)) {
+            return request->method;
+        }
+        if (const auto* notification = std::get_if<Notification>(message)) {
+            return notification->method;
+        }
+    }
+    return {};
+}
+
+std::optional<std::string> request_session_id(const HttpRequest& request) {
+    const auto values = header_values(request.headers, "Mcp-Session-Id");
+    if (values.empty()) {
+        return std::nullopt;
+    }
+    return std::string(trim(values.front()));
+}
+
+[[maybe_unused]] bool response_is_acceptable(const HttpRequest& request) {
+    const auto accept = header_values(request.headers, "Accept");
+    if (accept.empty()) {
+        return true;
+    }
+    return std::any_of(accept.begin(), accept.end(), [](const auto& value) {
+        return media_quality(value, "application/json") > 0.0 ||
+               media_quality(value, "text/event-stream") > 0.0;
+    });
+}
 
 std::string lower_ascii(std::string_view value) {
     std::string result(value);
@@ -69,6 +174,11 @@ bool valid_header_name(std::string_view name) {
     return !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char ch) {
         return has_token_char(ch);
     });
+}
+
+bool method_header_has_value(const Headers& headers) {
+    const auto values = header_values(headers, "Mcp-Method");
+    return !values.empty() && !values.front().empty();
 }
 
 std::string normalize_origin(std::string_view origin) {
@@ -612,8 +722,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         exchange->respond(401, {{"WWW-Authenticate", "Bearer"}}, "");
         return;
     }
-    if (request.method != "POST") {
-        exchange->respond(405, {{"Allow", "POST"}}, "");
+    if (request.method != "POST" && request.method != "GET" && request.method != "DELETE") {
+        exchange->respond(405, {{"Allow", "POST, GET, DELETE"}}, "");
         return;
     }
     if (std::any_of(request.headers.begin(), request.headers.end(), [](const auto& header) {
@@ -624,14 +734,64 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         return;
     }
 
-    const bool accept_json = accepts(request.headers, "application/json");
-    const bool accept_sse = accepts(request.headers, "text/event-stream");
-    if ((options_.response_mode == HttpResponseMode::json_only && !accept_json) ||
-        (options_.response_mode == HttpResponseMode::sse_only && !accept_sse) ||
-        (options_.response_mode == HttpResponseMode::automatic && !accept_json && !accept_sse)) {
-        exchange->respond(406, {}, "");
+    const auto session_id = request_session_id(request);
+    const auto version_header = single_header(request.headers, "MCP-Protocol-Version");
+    const auto accept_json = accepts(request.headers, "application/json");
+    const auto accept_sse = accepts(request.headers, "text/event-stream");
+    const auto legacy_header_present = bool(version_header) && is_legacy_protocol_version(*version_header);
+    const auto modern_header_present = bool(version_header) && is_modern_protocol_version(*version_header);
+    const bool accept_present = std::any_of(request.headers.begin(), request.headers.end(),
+                                           [](const auto& header) {
+                                               return lower_ascii(header.first) == "accept";
+                                           });
+    if (accept_present && !accept_json && !accept_sse) {
+        exchange->respond(406, {{"Content-Type", "application/json"}}, "");
         return;
     }
+
+    if (request.method == "GET") {
+        const bool modern_get = method_header_has_value(request.headers) ||
+                                (version_header && modern_header_present);
+        if (options_.mode == HttpMode::modern || modern_get) {
+            exchange->respond(405, {{"Allow", "POST"}}, "");
+            return;
+        }
+        if (!session_id && !version_header && !accept_present) {
+            exchange->respond(405, {{"Allow", "POST"}}, "");
+            return;
+        }
+        if (!session_id || !version_header || !legacy_header_present) {
+            respond_error(*exchange, 400,
+                          core::protocol_error(ErrorCode::invalid_request,
+                                               "Mcp-Session-Id and legacy MCP-Protocol-Version are required for GET"));
+            return;
+        }
+        auto& sse = exchange->begin_sse(200, {{"Content-Type", "text/event-stream"},
+                                              {"Cache-Control", "no-cache"},
+                                              {"X-Accel-Buffering", "no"}});
+        sse.write_event(R"({"jsonrpc":"2.0","method":"ping","params":{}})");
+        sse.close();
+        return;
+    }
+
+    if (request.method == "DELETE") {
+        if (!session_id && !version_header && !method_header_has_value(request.headers) && !accept_present) {
+            exchange->respond(405, {{"Allow", "POST"}}, "");
+            return;
+        }
+        if (!session_id) {
+            respond_error(*exchange, 400,
+                          core::protocol_error(ErrorCode::invalid_request, "Mcp-Session-Id is required for DELETE"));
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(legacy_session_mutex());
+            legacy_sessions().erase(*session_id);
+        }
+        exchange->respond(200, {{"Content-Type", "application/json"}}, "{}\n");
+        return;
+    }
+
     if (!content_type_is_json(request.headers)) {
         exchange->respond(415, {}, "");
         return;
@@ -643,7 +803,17 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         return;
     }
     const auto& message = std::get<Message>(parsed);
+
     if (std::holds_alternative<core::Notification>(message)) {
+        const auto& notification = std::get<core::Notification>(message);
+        if (notification.method == "notifications/initialized") {
+            exchange->respond(202, {}, "");
+            return;
+        }
+        if (session_id && version_header && legacy_header_present) {
+            exchange->respond(202, {}, "");
+            return;
+        }
         respond_error(*exchange, 400,
                       core::protocol_error(ErrorCode::invalid_request,
                                            "Client notifications are not defined for this protocol version"));
@@ -656,16 +826,97 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         return;
     }
     const auto& rpc_request = std::get<Request>(message);
-
     RpcError header_error{};
+
+    const bool legacy_request = session_id.has_value() || rpc_request.method == "initialize" ||
+                                (version_header && legacy_header_present) ||
+                                (request.body.find("initialize") != std::string::npos && !modern_header_present);
+    const bool modern_request = method_header_has_value(request.headers) ||
+                                (version_header && modern_header_present) ||
+                                (rpc_request.params.is_object() &&
+                                 rpc_request.params.contains("_meta") &&
+                                 rpc_request.params["_meta"].contains("io.modelcontextprotocol/protocolVersion"));
+
+    if (accept_present && !accept_json && !accept_sse) {
+        exchange->respond(406, {{"Content-Type", "application/json"}}, "");
+        return;
+    }
+
+    if (options_.mode == HttpMode::modern && !modern_request) {
+        respond_error(*exchange, 400,
+                      core::protocol_error(ErrorCode::invalid_request,
+                                           legacy_protocol_error_message()),
+                      rpc_request.id);
+        return;
+    }
+
+    if (legacy_request && !modern_request) {
+        if (rpc_request.method == "initialize") {
+            const std::string sid = generate_session_id();
+            Json result = { {"protocolVersion", "2025-11-25"},
+                            {"capabilities", {{"tools", {{"listChanged", false}}}}},
+                            {"serverInfo", {{"name", "cppmcp"}, {"title", "cppmcp"}, {"version", "0.1.0"}}} };
+            {
+                std::lock_guard<std::mutex> lock(legacy_session_mutex());
+                legacy_sessions()[sid] = LegacySession{sid, "2025-11-25"};
+            }
+            const auto response = core::ResultResponse{rpc_request.id, std::move(result)};
+            exchange->respond(200, {{"Mcp-Session-Id", sid}, {"Content-Type", "application/json"}},
+                             core::serialize_message(response));
+            return;
+        }
+        if (!session_id) {
+            respond_error(*exchange, 400,
+                          core::protocol_error(ErrorCode::invalid_request, "Missing Mcp-Session-Id"));
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(legacy_session_mutex());
+            const auto it = legacy_sessions().find(*session_id);
+            if (it == legacy_sessions().end()) {
+                respond_error(*exchange, 404,
+                              core::protocol_error(ErrorCode::invalid_request,
+                                                   "Unknown session"), rpc_request.id);
+                return;
+            }
+            it->second.last_seen = std::chrono::steady_clock::now();
+        }
+        if (version_header && *version_header == "1999-01-01") {
+            respond_error(*exchange, 400,
+                          core::protocol_error(ErrorCode::unsupported_protocol_version,
+                                               "Unsupported protocol version"));
+            return;
+        }
+        auto response = server_.handle_message(message, nullptr);
+        if (auto* result = std::get_if<core::ResultResponse>(&response)) {
+            const auto jsonrpc = core::ResultResponse{rpc_request.id, result->result};
+            exchange->respond(200, {{"Content-Type", "application/json"}},
+                             core::serialize_message(jsonrpc));
+            return;
+        }
+        if (auto* error = std::get_if<core::ErrorResponse>(&response)) {
+            respond_error(*exchange, 400, error->error, error->id.value_or(rpc_request.id));
+            return;
+        }
+        exchange->respond(202, {}, "");
+        return;
+    }
+
+    if (options_.mode == HttpMode::legacy && modern_request) {
+        respond_error(*exchange, 400,
+                      core::protocol_error(ErrorCode::invalid_request,
+                                           legacy_protocol_error_message()),
+                      rpc_request.id);
+        return;
+    }
+
     if (!validate_mirrored_headers(rpc_request, request.headers, header_error)) {
         respond_error(*exchange, 400, std::move(header_error), rpc_request.id);
         return;
     }
-    const auto protocol_version = single_header(request.headers, "MCP-Protocol-Version");
-    if (!protocol_version || !supported_modern_version(*protocol_version)) {
+    if (!version_header || !supported_modern_version(*version_header)) {
         const auto version_error =
-            core::unsupported_protocol_version_error(protocol_version.value_or(""),
+            core::unsupported_protocol_version_error(version_header.value_or(""),
                                                      {"2026-07-28"});
         respond_error(*exchange, 400, version_error, rpc_request.id);
         return;
@@ -683,7 +934,6 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                       rpc_request.id);
         return;
     }
-
     if (!has_client_capabilities(rpc_request)) {
         respond_error(*exchange, 400,
                       core::protocol_error(ErrorCode::invalid_request,
@@ -707,16 +957,13 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
     if (options_.response_mode == HttpResponseMode::sse_only) {
         start_sse();
     }
-    const bool can_emit_sse = options_.response_mode != HttpResponseMode::json_only &&
-                              accept_sse;
-    ToolContext context(
-        cancellation->get_token(),
-        [&](Json event) {
-            if (!can_emit_sse) {
-                throw std::logic_error("request does not accept streamed tool emissions");
-            }
-            start_sse().write_event(event.dump());
-        });
+    const bool can_emit_sse = options_.response_mode != HttpResponseMode::json_only && accept_sse;
+    ToolContext context(cancellation->get_token(), [&](Json event) {
+        if (!can_emit_sse) {
+            throw std::logic_error("request does not accept streamed tool emissions");
+        }
+        start_sse().write_event(event.dump());
+    });
     auto response = server_.handle_message(message, &context);
     if (rpc_request.method == "server/discover") {
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {

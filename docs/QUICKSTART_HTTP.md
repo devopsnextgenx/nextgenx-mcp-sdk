@@ -4,6 +4,37 @@ This guide uses the same endpoint and request headers as
 [`scripts/verify_3b.sh`](../scripts/verify_3b.sh). It assumes the project has
 been built with CMake and `curl`, `jq`, and Python 3 are installed.
 
+Legacy mode uses a session-bearing request flow:
+
+```bash
+URL="http://127.0.0.1:8000/mcp"
+INIT='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"verify","version":"0"}}}'
+curl -sS -D - -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d "$INIT" "$URL"
+```
+
+A successful legacy initialize response includes a `Mcp-Session-Id` header and a
+JSON-RPC result payload. Later requests reuse that session ID and the legacy
+protocol version header:
+
+```bash
+curl -sS -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'Mcp-Session-Id: <session-id>' \
+  -H 'MCP-Protocol-Version: 2025-11-25' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  "$URL"
+```
+
+The example server also supports modern, dual, and legacy runtime modes:
+
+```bash
+./build/cppmcp_http_server --port 8000 --mode modern
+./build/cppmcp_http_server --port 8000 --mode legacy
+./build/cppmcp_http_server --port 8000 --mode dual --ping-interval-ms 500
+```
+
 ## Start the example
 
 ```sh
