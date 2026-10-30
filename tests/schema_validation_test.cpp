@@ -3,6 +3,7 @@
 #include "test.hpp"
 
 #include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -139,4 +140,68 @@ void test_output_schema() {
         CPPMCP_CHECK(unknown_tool->error.code ==
                      static_cast<std::int32_t>(cppmcp::core::ErrorCode::invalid_params));
     }
+}
+
+void test_progress_notifications() {
+    std::vector<nlohmann::json> events;
+    const nlohmann::json params = {{"_meta", {{"progressToken", "progress-1"}}}};
+    cppmcp::ToolContext context({}, [&](nlohmann::json event) {
+        events.push_back(std::move(event));
+    }, params);
+    context.report_progress(1, 2, "starting");
+    context.report_progress(2, 2);
+    CPPMCP_CHECK(events.size() == 2);
+    if (events.size() == 2) {
+        CPPMCP_CHECK(events[0]["method"] == "notifications/progress");
+        CPPMCP_CHECK(events[0]["params"]["progressToken"] == "progress-1");
+        CPPMCP_CHECK(events[1]["params"]["progress"] == 2);
+    }
+    bool rejected_non_increasing = false;
+    try {
+        context.report_progress(2, 2);
+    } catch (const std::invalid_argument&) {
+        rejected_non_increasing = true;
+    }
+    CPPMCP_CHECK(rejected_non_increasing);
+    context.finish();
+    context.report_progress(3, 3);
+    CPPMCP_CHECK(events.size() == 2);
+
+    std::vector<nlohmann::json> no_token_events;
+    cppmcp::ToolContext no_token({}, [&](nlohmann::json event) {
+        no_token_events.push_back(std::move(event));
+    });
+    no_token.report_progress(1, 1);
+    CPPMCP_CHECK(no_token_events.empty());
+}
+
+void test_logging_notifications() {
+    std::vector<nlohmann::json> events;
+    const nlohmann::json params = {
+        {"_meta", {{"io.modelcontextprotocol/logLevel", "warning"}}}};
+    cppmcp::ToolContext context({}, [&](nlohmann::json event) {
+        events.push_back(std::move(event));
+    }, params);
+    for (const auto* level : {"debug", "info", "warning", "error"}) {
+        context.emit({{"jsonrpc", "2.0"},
+                      {"method", "notifications/message"},
+                      {"params", {{"level", level},
+                                   {"logger", "test"},
+                                   {"data", {{"api_key", "secret"}, {"message", "safe"}}}}}});
+    }
+    CPPMCP_CHECK(events.size() == 2);
+    if (events.size() == 2) {
+        CPPMCP_CHECK(events[0]["params"]["level"] == "warning");
+        CPPMCP_CHECK(events[0]["params"]["data"]["api_key"] == "[redacted]");
+        CPPMCP_CHECK(events[1]["params"]["level"] == "error");
+    }
+
+    std::vector<nlohmann::json> no_level_events;
+    cppmcp::ToolContext no_level({}, [&](nlohmann::json event) {
+        no_level_events.push_back(std::move(event));
+    });
+    no_level.emit({{"jsonrpc", "2.0"},
+                   {"method", "notifications/message"},
+                   {"params", {{"level", "error"}, {"logger", "test"}, {"data", "safe"}}}});
+    CPPMCP_CHECK(no_level_events.empty());
 }

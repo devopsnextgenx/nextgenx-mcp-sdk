@@ -66,19 +66,12 @@ inline void add_phase4_tools(Server& server) {
     }, [](const Json& args, const Json& params, ToolContext& context) {
         const auto steps = args.value("steps", 1);
         const auto delay = std::chrono::milliseconds(args.value("delay_ms", 10));
-        const auto meta = params.value("_meta", Json::object());
-        const auto progress_token = meta.value("progressToken", Json{});
+        (void)params;
         for (int step = 1; step <= steps; ++step) {
             if (context.cancelled()) {
                 break;
             }
-            if (!progress_token.is_null()) {
-                context.emit({{"jsonrpc", "2.0"},
-                              {"method", "notifications/progress"},
-                              {"params", {{"progressToken", progress_token},
-                                           {"progress", step},
-                                           {"total", steps}}}});
-            }
+            context.report_progress(step, steps);
             std::this_thread::sleep_for(delay);
         }
         return Json{{"steps", steps}};

@@ -55,6 +55,7 @@ private:
 
 struct HttpClientOptions {
     std::string url;
+    nlohmann::json client_capabilities = nlohmann::json::object();
     NegotiationPolicy policy = NegotiationPolicy::prefer_modern;
     std::chrono::milliseconds connect_timeout{5000};
     std::chrono::milliseconds request_timeout{15000};

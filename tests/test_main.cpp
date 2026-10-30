@@ -12,6 +12,8 @@ void test_schema_contract();
 void test_schema_register();
 void test_schema_limits();
 void test_output_schema();
+void test_progress_notifications();
+void test_logging_notifications();
 void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
 void test_http_handler();
@@ -138,6 +140,8 @@ int main(int argc, char** argv) {
     run_selected("schema_register", test_schema_register);
     run_selected("schema_limits", test_schema_limits);
     run_selected("output_schema", test_output_schema);
+    run_selected("progress", test_progress_notifications);
+    run_selected("logging", test_logging_notifications);
     run_selected("phase2_memory", test_phase2_memory_roundtrip);
     run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
     run_selected("http_handler", test_http_handler);

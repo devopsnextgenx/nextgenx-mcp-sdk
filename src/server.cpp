@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <exception>
+#include <array>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 
 #include "cppmcp/core/log.hpp"
 #include "cppmcp/transport/http.hpp"
@@ -27,6 +30,52 @@ std::string lowercase_ascii(std::string_view value) {
         return static_cast<char>(std::tolower(ch));
     });
     return result;
+}
+
+int log_level_rank(std::string_view level) {
+    constexpr std::array<std::pair<std::string_view, int>, 8> levels = {{
+        {"emergency", 0}, {"alert", 1}, {"critical", 2}, {"error", 3},
+        {"warning", 4}, {"notice", 5}, {"info", 6}, {"debug", 7},
+    }};
+    const auto match = std::find_if(levels.begin(), levels.end(), [&](const auto& entry) {
+        return entry.first == level;
+    });
+    return match == levels.end() ? -1 : match->second;
+}
+
+nlohmann::json sanitize_log_value(const nlohmann::json& value) {
+    if (value.is_object()) {
+        auto sanitized = nlohmann::json::object();
+        for (auto item = value.begin(); item != value.end(); ++item) {
+            const auto key = lowercase_ascii(item.key());
+            if (key.find("password") != std::string::npos ||
+                key.find("secret") != std::string::npos ||
+                key.find("token") != std::string::npos ||
+                key.find("authorization") != std::string::npos ||
+                key.find("api_key") != std::string::npos ||
+                key.find("apikey") != std::string::npos) {
+                sanitized[item.key()] = "[redacted]";
+            } else {
+                sanitized[item.key()] = sanitize_log_value(item.value());
+            }
+        }
+        return sanitized;
+    }
+    if (value.is_array()) {
+        auto sanitized = nlohmann::json::array();
+        for (const auto& item : value) {
+            sanitized.push_back(sanitize_log_value(item));
+        }
+        return sanitized;
+    }
+    if (value.is_string()) {
+        const auto text = value.get<std::string>();
+        if (text.find_first_of("\r\n") != std::string::npos ||
+            (!text.empty() && text.front() == '/') || text.find(":\\") != std::string::npos) {
+            return "[redacted]";
+        }
+    }
+    return value;
 }
 
 core::Json tool_payload(const ToolDefinition& tool) {
@@ -168,14 +217,114 @@ void ToolBuilder::validate_and_annotate() {
 }
 
 ToolContext::ToolContext(std::stop_token cancellation,
-                         std::function<void(nlohmann::json)> emitter)
-    : cancellation_(cancellation), emitter_(std::move(emitter)) {}
+                         std::function<void(nlohmann::json)> emitter,
+                         const nlohmann::json& request_params,
+                         std::chrono::milliseconds minimum_notification_interval,
+                         std::size_t maximum_notifications)
+    : cancellation_(cancellation),
+      emitter_(std::move(emitter)),
+      minimum_notification_interval_(minimum_notification_interval),
+      maximum_notifications_(maximum_notifications) {
+    const auto meta = core::meta::get_meta(request_params);
+    const auto token = meta.find("progressToken");
+    if (token != meta.end() && (token->is_string() || token->is_number_integer())) {
+        progress_token_ = *token;
+    }
+    const auto level = meta.find("io.modelcontextprotocol/logLevel");
+    if (level != meta.end() && level->is_string() &&
+        log_level_rank(level->get_ref<const std::string&>()) >= 0) {
+        log_level_ = level->get<std::string>();
+    }
+}
 
 void ToolContext::emit(nlohmann::json event) const {
     if (!emitter_) {
         throw std::logic_error("request context does not support emissions");
     }
+    std::lock_guard<std::mutex> lock(emission_mutex_);
+    if (finished_ || cancelled() || notification_count_ >= maximum_notifications_) {
+        return;
+    }
+    if (event.is_object() && event.value("method", std::string{}) == "notifications/message") {
+        if (!log_level_) {
+            return;
+        }
+        auto& params = event["params"];
+        const auto level = params.value("level", std::string{});
+        const auto message_rank = log_level_rank(level);
+        const auto threshold_rank = log_level_rank(*log_level_);
+        if (message_rank < 0 || threshold_rank < 0 || message_rank > threshold_rank) {
+            return;
+        }
+        if (params.contains("data")) {
+            params["data"] = sanitize_log_value(params["data"]);
+        }
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (notification_count_ > 0 && minimum_notification_interval_.count() > 0 &&
+        now - last_notification_ < minimum_notification_interval_) {
+        return;
+    }
     emitter_(std::move(event));
+    ++notification_count_;
+    last_notification_ = now;
+}
+
+void ToolContext::report_progress(double progress, std::optional<double> total,
+                                  std::optional<std::string> message) const {
+    if (!progress_token_) {
+        return;
+    }
+    if (!std::isfinite(progress) || (total && !std::isfinite(*total))) {
+        throw std::invalid_argument("progress values must be finite numbers");
+    }
+    if (!emitter_) {
+        throw std::logic_error("request context does not support emissions");
+    }
+    std::lock_guard<std::mutex> lock(emission_mutex_);
+    if (finished_ || cancelled() || notification_count_ >= maximum_notifications_) {
+        return;
+    }
+    if (last_progress_ && progress <= *last_progress_) {
+        throw std::invalid_argument("progress values must strictly increase");
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (notification_count_ > 0 && minimum_notification_interval_.count() > 0 &&
+        now - last_notification_ < minimum_notification_interval_) {
+        return;
+    }
+    nlohmann::json params = {{"progressToken", *progress_token_}, {"progress", progress}};
+    if (total) {
+        params["total"] = *total;
+    }
+    if (message) {
+        params["message"] = std::move(*message);
+    }
+    emitter_({{"jsonrpc", "2.0"}, {"method", "notifications/progress"},
+              {"params", std::move(params)}});
+    last_progress_ = progress;
+    ++notification_count_;
+    last_notification_ = now;
+}
+
+void ToolContext::log(std::string_view level, std::string logger_name,
+                      nlohmann::json data) const {
+    emit({{"jsonrpc", "2.0"}, {"method", "notifications/message"},
+          {"params", {{"level", level}, {"logger", std::move(logger_name)},
+                       {"data", std::move(data)}}}});
+}
+
+void ToolContext::set_log_level(std::string level) {
+    if (log_level_rank(level) < 0) {
+        throw std::invalid_argument("unrecognized log level");
+    }
+    std::lock_guard<std::mutex> lock(emission_mutex_);
+    log_level_ = std::move(level);
+}
+
+void ToolContext::finish() noexcept {
+    std::lock_guard<std::mutex> lock(emission_mutex_);
+    finished_ = true;
 }
 
 bool ToolContext::cancelled() const noexcept {
@@ -267,7 +416,7 @@ std::vector<HeaderParamDefinition> Server::tool_header_params(const std::string&
 
 nlohmann::json Server::discover() const {
     return {{"protocolVersions", nlohmann::json::array({"2026-07-28", "2025-11-25"})},
-            {"capabilities", {{"tools", {{"listChanged", true}}}}},
+            {"capabilities", {{"tools", {{"listChanged", true}}}, {"logging", nlohmann::json::object()}}},
             {"serverInfo", {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
 }
 
@@ -301,6 +450,18 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     const auto version = request_protocol_version(request.params);
     CPPMCP_LOG_DEBUG("request method=" << method << " protocolVersion='" << version << "'");
 
+    if (!version.empty()) {
+        const auto meta = core::meta::get_meta(request.params);
+        const auto level = meta.find("io.modelcontextprotocol/logLevel");
+        if (level != meta.end() &&
+            (!level->is_string() || log_level_rank(level->get<std::string>()) < 0)) {
+            return core::ErrorResponse{
+                request.id,
+                core::protocol_error(core::ErrorCode::invalid_params,
+                                     "Invalid logging level")};
+        }
+    }
+
     if (method == "server/discover") {
         return core::ResultResponse{request.id, discover()};
     }
@@ -308,13 +469,35 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     if (method == "initialize") {
         return core::ResultResponse{request.id,
                                     {{"protocolVersion", "2025-11-25"},
-                                     {"capabilities", {{"tools", {{"listChanged", true}}}}},
+                                     {"capabilities", {{"tools", {{"listChanged", true}}},
+                                                        {"logging", nlohmann::json::object()}}},
                                      {"serverInfo", {{"name", info_.name},
                                                      {"title", info_.title},
                                                      {"version", info_.version}}}}};
     }
 
     if (method == "ping") {
+        return core::ResultResponse{request.id, core::Json::object()};
+    }
+
+    if (method == "logging/setLevel") {
+        if (!version.empty()) {
+            return core::ErrorResponse{
+                request.id,
+                core::protocol_error(core::ErrorCode::method_not_found,
+                                     "logging/setLevel is only available to legacy clients")};
+        }
+        const auto level = request.params.value("level", std::string{});
+        if (log_level_rank(level) < 0) {
+            return core::ErrorResponse{
+                request.id,
+                core::protocol_error(core::ErrorCode::invalid_params,
+                                     "Invalid logging level")};
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            legacy_log_level_ = level;
+        }
         return core::ResultResponse{request.id, core::Json::object()};
     }
 
@@ -381,6 +564,16 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
         };
 
         CPPMCP_LOG_DEBUG("calling tool '" << name << "'");
+        if (context != nullptr && version.empty()) {
+            std::optional<std::string> level;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                level = legacy_log_level_;
+            }
+            if (level) {
+                context->set_log_level(*level);
+            }
+        }
         const auto arguments = request.params.value("arguments", nlohmann::json::object());
         if (schemas.input) {
             const auto validation_error = schemas.input->validate(arguments);

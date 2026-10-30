@@ -851,7 +851,7 @@ struct HttpClientTransport::Impl {
             std::int64_t{1},
             "initialize",
             {{"protocolVersion", "2025-11-25"},
-             {"capabilities", core::Json::object()},
+             {"capabilities", options.client_capabilities},
              {"clientInfo", {{"name", "cppmcp-client"}, {"version", "0.1.0"}}}},
         };
         const auto response = perform(core::serialize_message(initialize), "initialize", {}, true);
@@ -1468,7 +1468,13 @@ void HttpClientTransport::send(const core::Message& message) {
                 request->params["_meta"] = modern_meta("cppmcp-client", "0.1.0");
             }
         } else if (request->params.is_object()) {
+            const auto meta = request->params.value("_meta", core::Json::object());
             request->params.erase("_meta");
+            if (meta.is_object() && meta.contains("progressToken") &&
+                (meta["progressToken"].is_string() ||
+                 meta["progressToken"].is_number_integer())) {
+                request->params["_meta"] = {{"progressToken", meta["progressToken"]}};
+            }
         }
     }
     if (auto* notification = std::get_if<core::Notification>(&body_message)) {

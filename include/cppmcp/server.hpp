@@ -1,10 +1,12 @@
 #pragma once
 
-#include <functional>
 #include <atomic>
+#include <chrono>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -79,15 +81,35 @@ class ToolContext {
 public:
     ToolContext() = default;
     ToolContext(std::stop_token cancellation,
-                std::function<void(nlohmann::json)> emitter);
+                std::function<void(nlohmann::json)> emitter,
+                const nlohmann::json& request_params = nlohmann::json::object(),
+                std::chrono::milliseconds minimum_notification_interval =
+                    std::chrono::milliseconds(0),
+                std::size_t maximum_notifications = 100);
 
     void emit(nlohmann::json event) const;
+    void report_progress(double progress, std::optional<double> total = std::nullopt,
+                         std::optional<std::string> message = std::nullopt) const;
+    [[deprecated("MCP logging is deprecated in protocol 2026-07-28; use stderr or OpenTelemetry")]]
+    void log(std::string_view level, std::string logger_name,
+             nlohmann::json data) const;
+    void set_log_level(std::string level);
+    void finish() noexcept;
     bool cancelled() const noexcept;
     std::stop_token cancellation_token() const noexcept;
 
 private:
     std::stop_token cancellation_;
     std::function<void(nlohmann::json)> emitter_;
+    std::optional<nlohmann::json> progress_token_;
+    std::optional<std::string> log_level_;
+    std::chrono::milliseconds minimum_notification_interval_{0};
+    std::size_t maximum_notifications_ = 100;
+    mutable std::mutex emission_mutex_;
+    mutable std::size_t notification_count_ = 0;
+    mutable std::optional<double> last_progress_;
+    mutable std::chrono::steady_clock::time_point last_notification_{};
+    bool finished_ = false;
 };
 
 using ContextToolHandler =
@@ -172,6 +194,7 @@ private:
     std::shared_ptr<core::ISchemaValidator> schema_validator_;
     core::SchemaValidationLimits schema_limits_;
     std::atomic_bool validate_output_{true};
+    std::optional<std::string> legacy_log_level_;
     std::shared_ptr<transport::SubscriptionRegistry> subscriptions_;
 
     friend class transport::McpHttpHandler;

@@ -68,7 +68,22 @@ int main() {
 
     auto transport = std::make_shared<cppmcp::transport::StdioServerTransport>();
     transport->on_message([&](const cppmcp::core::Message& message) {
-        auto response = server.handle_message(message);
+        nlohmann::json request_params = nlohmann::json::object();
+        if (const auto* request = std::get_if<cppmcp::core::Request>(&message)) {
+            request_params = request->params;
+        }
+        std::stop_source cancellation;
+        cppmcp::ToolContext context(cancellation.get_token(), [&](nlohmann::json event) {
+            if (!event.is_object() || !event.contains("method") ||
+                !event["method"].is_string()) {
+                return;
+            }
+            transport->send(cppmcp::core::Notification{
+                event["method"].get<std::string>(),
+                event.value("params", nlohmann::json::object())});
+        }, request_params);
+        auto response = server.handle_message(message, &context);
+        context.finish();
         if (std::holds_alternative<cppmcp::core::ResultResponse>(response) ||
             std::holds_alternative<cppmcp::core::ErrorResponse>(response)) {
             transport->send(response);

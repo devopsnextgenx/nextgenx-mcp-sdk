@@ -327,6 +327,7 @@ if(CPPMCP_BUILD_TESTS)
     )
         foreach(test_name IN ITEMS
             json_rpc versions schema_contract schema_register schema_limits output_schema
+            progress logging
             phase2_memory phase2_stdio
             http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types
             cancellation

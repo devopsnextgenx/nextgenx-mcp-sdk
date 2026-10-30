@@ -896,7 +896,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         if (rpc_request.method == "initialize") {
             const std::string sid = generate_session_id();
             Json result = { {"protocolVersion", "2025-11-25"},
-                            {"capabilities", {{"tools", {{"listChanged", true}}}}},
+                            {"capabilities", {{"tools", {{"listChanged", true}}},
+                                               {"logging", Json::object()}}},
                             {"serverInfo", {{"name", "cppmcp"}, {"title", "cppmcp"}, {"version", "0.1.0"}}} };
             {
                 std::lock_guard<std::mutex> lock(legacy_session_mutex());
@@ -930,15 +931,47 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                                                "Unsupported protocol version"));
             return;
         }
-        auto response = server_.handle_message(message, nullptr);
+        auto cancellation = std::make_shared<std::stop_source>();
+        SseStream* stream = nullptr;
+        const auto start_sse = [&]() -> SseStream& {
+            if (stream == nullptr) {
+                stream = &exchange->begin_sse(
+                    200, {{"Content-Type", "text/event-stream"},
+                          {"Cache-Control", "no-cache"},
+                          {"X-Accel-Buffering", "no"}});
+            }
+            return *stream;
+        };
+        const bool can_emit_sse = accept_sse &&
+                                  options_.response_mode != HttpResponseMode::json_only;
+        ToolContext context(cancellation->get_token(), [&](Json event) {
+            if (!can_emit_sse) {
+                throw std::logic_error("legacy request does not accept streamed emissions");
+            }
+            start_sse().write_event(event.dump());
+        }, rpc_request.params, options_.notification_min_interval,
+           options_.max_notifications_per_request);
+        auto response = server_.handle_message(message, &context);
+        context.finish();
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {
             const auto jsonrpc = core::ResultResponse{rpc_request.id, result->result};
-            exchange->respond(200, {{"Content-Type", "application/json"}},
-                             core::serialize_message(jsonrpc));
+            if (stream != nullptr) {
+                stream->write_event(core::serialize_message(jsonrpc));
+                stream->close();
+            } else {
+                exchange->respond(200, {{"Content-Type", "application/json"}},
+                                  core::serialize_message(jsonrpc));
+            }
             return;
         }
         if (auto* error = std::get_if<core::ErrorResponse>(&response)) {
-            respond_error(*exchange, 400, error->error, error->id.value_or(rpc_request.id));
+            if (stream != nullptr) {
+                stream->write_event(core::serialize_message(*error));
+                stream->close();
+            } else {
+                respond_error(*exchange, 400, error->error,
+                              error->id.value_or(rpc_request.id));
+            }
             return;
         }
         exchange->respond(202, {}, "");
@@ -1114,8 +1147,10 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             throw std::logic_error("request does not accept streamed tool emissions");
         }
         start_sse().write_event(event.dump());
-    });
+    }, rpc_request.params, options_.notification_min_interval,
+       options_.max_notifications_per_request);
     auto response = server_.handle_message(message, &context);
+    context.finish();
     if (rpc_request.method == "server/discover") {
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {
             result->result["protocolVersions"] = Json::array({"2026-07-28"});
