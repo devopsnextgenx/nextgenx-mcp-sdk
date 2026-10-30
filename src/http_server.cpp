@@ -867,6 +867,11 @@ namespace cppmcp {
 
 std::unique_ptr<transport::HttpServerHandle> Server::start_http(
     const transport::HttpOptions& options) {
+    set_validate_output(options.validate_output);
+    if (!options.request_state_key.empty()) {
+        request_state_codec_ = std::make_shared<core::HmacRequestStateCodec>(
+            std::vector<core::RequestStateKey>{{"configured", options.request_state_key}});
+    }
     auto impl = std::make_unique<transport::HttpServerHandle::Impl>(*this, options);
     return std::unique_ptr<transport::HttpServerHandle>(new transport::HttpServerHandle(
         std::move(impl)));

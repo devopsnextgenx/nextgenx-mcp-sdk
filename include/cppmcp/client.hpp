@@ -36,6 +36,10 @@ public:
             on_log;
         std::function<nlohmann::json(const std::string&, const nlohmann::json&)>
             on_elicit;
+        std::function<nlohmann::json(const std::string&, const nlohmann::json&)>
+            on_input;
+        nlohmann::json client_capabilities = nlohmann::json::object();
+        bool allow_url_elicitation = false;
         std::size_t max_rounds = 10;
         std::chrono::milliseconds timeout{5000};
     };

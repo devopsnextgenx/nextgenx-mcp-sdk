@@ -146,8 +146,8 @@ inline void add_phase4_tools(Server& server) {
                                          {"message", "Continue?"},
                                          {"requestedSchema",
                                           {{"type", "object"},
-                                           {"properties", {{"continue", {{"type", "boolean"}}}}},
-                                           {"required", {"continue"}}}}}}}}}}};
+                                           {"properties", {{"confirm", {{"type", "boolean"}}}}},
+                                           {"required", {"confirm"}}}}}}}}}}};
         },
     });
 }

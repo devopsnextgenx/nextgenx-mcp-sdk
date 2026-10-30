@@ -40,5 +40,6 @@ public:
 };
 
 std::shared_ptr<ISchemaValidator> make_json_schema_validator();
+void validate_elicitation_form_schema(const nlohmann::json& schema);
 
 }  // namespace cppmcp::core

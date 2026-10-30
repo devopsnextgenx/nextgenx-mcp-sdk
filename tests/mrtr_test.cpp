@@ -1,0 +1,294 @@
+#include "cppmcp/core/request_state.hpp"
+#include "cppmcp/client.hpp"
+#include "cppmcp/server.hpp"
+#include "test.hpp"
+
+#include <chrono>
+#include <stdexcept>
+#include <string>
+
+namespace {
+
+using Json = nlohmann::json;
+constexpr auto secret = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+template <typename Fn>
+bool rejects(Fn&& fn) {
+    try {
+        fn();
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+    return false;
+}
+
+Json input_requests() {
+    return {{"confirm", {{"method", "elicitation/create"},
+                         {"params", {{"mode", "form"}, {"message", "Confirm?"},
+                                     {"requestedSchema", {{"type", "object"},
+                                         {"properties", {{"confirm", {{"type", "boolean"}}}}},
+                                         {"required", {"confirm"}}, {"additionalProperties", false}}}}}}}};
+}
+
+cppmcp::core::Request call() {
+    return {1, "tools/call", {{"name", "confirm"}, {"arguments", {{"project", "alpha"}}},
+        {"_meta", {{"io.modelcontextprotocol/protocolVersion", "2026-07-28"},
+                   {"io.modelcontextprotocol/clientCapabilities", {{"elicitation", {{"form", Json::object()}}}}}}}}};
+}
+
+void register_tool(cppmcp::Server& server) {
+    cppmcp::ToolDefinition tool;
+    tool.name = "confirm";
+    server.add_tool(std::move(tool), [](const Json&, const Json&, cppmcp::ToolContext& context) {
+        if (context.input_responses().empty()) {
+            return cppmcp::ToolResult::input_required(input_requests(), {{"checkpoint", 7}}).to_json();
+        }
+        return cppmcp::ToolResult::structured({{"state", context.state()},
+                                               {"response", context.input_responses().at("confirm")}}).to_json();
+    });
+}
+
+Json initial_result(cppmcp::Server& server) {
+    const auto response = server.handle_request(call());
+    const auto* result = std::get_if<cppmcp::core::ResultResponse>(&response);
+    CPPMCP_CHECK(result != nullptr);
+    return result ? result->result : Json::object();
+}
+
+cppmcp::core::Request continuation(const Json& first) {
+    auto request = call();
+    request.id = 2;
+    request.params["requestState"] = first.at("requestState");
+    request.params["inputResponses"] = {{"confirm", {{"action", "accept"}, {"content", {{"confirm", true}}}}}};
+    return request;
+}
+
+Json run_client(cppmcp::Server& server, cppmcp::Client::CallToolOptions options) {
+    auto [client_transport, server_transport] = cppmcp::core::make_memory_transport_pair();
+    std::vector<cppmcp::core::RequestId> ids;
+    server_transport->on_message([&](const cppmcp::core::Message& message) {
+        if (const auto* request = std::get_if<cppmcp::core::Request>(&message)) {
+            for (const auto& previous : ids) CPPMCP_CHECK(previous != request->id);
+            ids.push_back(request->id);
+        }
+        server_transport->send(server.handle_message(message));
+    });
+    cppmcp::Client client;
+    client.connect(client_transport);
+    try {
+        auto result = client.call_tool("confirm", {{"project", "alpha"}}, std::move(options));
+        client.close();
+        return result;
+    } catch (...) {
+        client.close();
+        throw;
+    }
+}
+
+}  // namespace
+
+void test_mrtr() {
+    cppmcp::Server server;
+    register_tool(server);
+    const auto first = initial_result(server);
+    CPPMCP_CHECK(first.value("resultType", std::string{}) == "input_required");
+    CPPMCP_CHECK(first.contains("requestState"));
+    CPPMCP_CHECK(!first.contains("privateState"));
+    if (!first.contains("requestState")) return;
+    const auto response = server.handle_request(continuation(first));
+    const auto* result = std::get_if<cppmcp::core::ResultResponse>(&response);
+    CPPMCP_CHECK(result != nullptr);
+    if (result) {
+        CPPMCP_CHECK(result->result["resultType"] == "complete");
+        CPPMCP_CHECK(result->result["structuredContent"]["state"]["checkpoint"] == 7);
+    }
+    auto bad = continuation(first);
+    bad.params["arguments"]["project"] = "beta";
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+    bad = continuation(first);
+    bad.params.erase("requestState");
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+    bad.params["requestState"] = 42;
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+    bad = continuation(first);
+    bad.params["requestState"] = first["requestState"].get<std::string>() + "x";
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+}
+
+void test_elicit() {
+    cppmcp::Server server;
+    register_tool(server);
+    auto unsupported = call();
+    unsupported.params["_meta"]["io.modelcontextprotocol/clientCapabilities"] = Json::object();
+    const auto response = server.handle_request(unsupported);
+    const auto* error = std::get_if<cppmcp::core::ErrorResponse>(&response);
+    CPPMCP_CHECK(error != nullptr);
+    if (error) CPPMCP_CHECK(error->error.code == -32021);
+    const auto first = initial_result(server);
+    if (!first.contains("requestState")) return;
+    auto bad = continuation(first);
+    bad.params["inputResponses"]["confirm"]["content"]["confirm"] = "yes";
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+    bad = continuation(first);
+    bad.params["inputResponses"]["unknown"] = {{"action", "cancel"}};
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+    bad = continuation(first);
+    bad.params["inputResponses"]["confirm"]["action"] = "unknown";
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(bad)));
+    for (const auto* action : {"decline", "cancel"}) {
+        auto declined = continuation(first);
+        declined.params["inputResponses"]["confirm"] = {{"action", action}};
+        CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ResultResponse>(server.handle_request(declined)));
+    }
+}
+
+void test_request_state() {
+    using namespace std::chrono;
+    auto now = system_clock::time_point(seconds(1000));
+    cppmcp::core::HmacRequestStateCodec codec({{"key1", secret}}, seconds(10), 8192, [&] { return now; });
+    cppmcp::core::RequestStateBinding binding;
+    binding.method = "tools/call";
+    binding.name = "confirm";
+    binding.params = {{"arguments", {{"project", "alpha"}}}};
+    binding.subject = "subject-1";
+    binding.private_payload = {{"checkpoint", 7}};
+    binding.input_request_ids = {"confirm"};
+    binding.round = 1;
+    const auto token = codec.issue(binding);
+    CPPMCP_CHECK(codec.verify(token, binding).private_payload == binding.private_payload);
+    CPPMCP_CHECK(codec.verify(token, binding).input_request_ids == binding.input_request_ids);
+    CPPMCP_CHECK(rejects([&] { codec.verify(token + "x", binding); }));
+    CPPMCP_CHECK(rejects([&] { codec.verify("v1.invalid", binding); }));
+    auto changed = binding;
+    changed.subject = "subject-2";
+    CPPMCP_CHECK(rejects([&] { codec.verify(token, changed); }));
+    changed = binding;
+    changed.name = "other";
+    CPPMCP_CHECK(rejects([&] { codec.verify(token, changed); }));
+    changed = binding;
+    changed.method = "prompts/get";
+    CPPMCP_CHECK(rejects([&] { codec.verify(token, changed); }));
+    changed = binding;
+    changed.params["arguments"]["project"] = "beta";
+    CPPMCP_CHECK(rejects([&] { codec.verify(token, changed); }));
+    now += seconds(10);
+    CPPMCP_CHECK(rejects([&] { codec.verify(token, binding); }));
+    now -= seconds(11);
+    CPPMCP_CHECK(rejects([&] { codec.verify(token, binding); }));
+    CPPMCP_CHECK(rejects([&] { cppmcp::core::HmacRequestStateCodec invalid(
+        std::vector<cppmcp::core::RequestStateKey>{{"key", "bad"}}); }));
+    CPPMCP_CHECK(rejects([&] { cppmcp::core::HmacRequestStateCodec invalid({{"key", secret}}, seconds(0)); }));
+}
+
+void test_two_instance() {
+    cppmcp::ServerOptions options;
+    options.request_state_keys = {{"shared", secret}};
+    cppmcp::Server first({"first", "first", "1"}, options);
+    cppmcp::Server second({"second", "second", "1"}, options);
+    register_tool(first);
+    register_tool(second);
+    const auto initial = initial_result(first);
+    if (!initial.contains("requestState")) return;
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ResultResponse>(second.handle_request(continuation(initial))));
+    cppmcp::Server foreign;
+    register_tool(foreign);
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(foreign.handle_request(continuation(initial))));
+    cppmcp::core::HmacRequestStateCodec old(
+        std::vector<cppmcp::core::RequestStateKey>{{"old", secret}});
+    cppmcp::core::HmacRequestStateCodec rotated({{"old", secret}, {"new", std::string(64, 'a')}});
+    cppmcp::core::RequestStateBinding binding;
+    const auto old_token = old.issue(binding);
+    CPPMCP_CHECK(rotated.verify(old_token, binding).subject == binding.subject);
+    CPPMCP_CHECK(rejects([&] { old.verify(rotated.issue(binding), binding); }));
+}
+
+void test_mrtr_client() {
+    cppmcp::Server server;
+    register_tool(server);
+    cppmcp::Client::CallToolOptions options;
+    int invocations = 0;
+    options.on_elicit = [&](const std::string& id, const Json& request) {
+        ++invocations;
+        CPPMCP_CHECK(id == "confirm");
+        CPPMCP_CHECK(request["params"]["mode"] == "form");
+        return Json{{"action", "accept"}, {"content", {{"confirm", true}}}};
+    };
+    const auto result = run_client(server, options);
+    CPPMCP_CHECK(invocations == 1);
+    CPPMCP_CHECK(result["structuredContent"]["state"]["checkpoint"] == 7);
+
+    cppmcp::ToolDefinition pending;
+    pending.name = "confirm";
+    server.add_tool(pending, [](const Json&, const Json&, cppmcp::ToolContext& context) {
+        return context.state().value("done", false)
+            ? cppmcp::ToolResult::structured(true).to_json()
+            : cppmcp::ToolResult::input_required(Json::object(), {{"done", true}}).to_json();
+    });
+    CPPMCP_CHECK(run_client(server, {})["structuredContent"] == true);
+
+    server.add_tool(pending, [](const Json&, const Json&, cppmcp::ToolContext&) {
+        return cppmcp::ToolResult::input_required(input_requests()).to_json();
+    });
+    options.max_rounds = 1;
+    bool limited = false;
+    try {
+        (void)run_client(server, options);
+    } catch (const std::runtime_error& error) {
+        limited = std::string(error.what()).find("TooManyRounds") != std::string::npos;
+    }
+    CPPMCP_CHECK(limited);
+}
+
+void test_elicit_url() {
+    cppmcp::Server server;
+    cppmcp::ToolDefinition tool;
+    tool.name = "confirm";
+    server.add_tool(tool, [](const Json&, const Json&, cppmcp::ToolContext& context) {
+        return context.input_responses().empty()
+            ? cppmcp::ToolResult::input_required({{"authorize", {{"method", "elicitation/create"},
+                {"params", {{"mode", "url"}, {"message", "Authorize"},
+                             {"url", "https://example.test/authorize"}}}}}}).to_json()
+            : cppmcp::ToolResult::structured(true).to_json();
+    });
+    cppmcp::Client::CallToolOptions options;
+    options.allow_url_elicitation = true;
+    options.on_elicit = [](const std::string&, const Json& request) {
+        CPPMCP_CHECK(request["params"]["url"] == "https://example.test/authorize");
+        return Json{{"action", "accept"}};
+    };
+    CPPMCP_CHECK(run_client(server, options)["structuredContent"] == true);
+    auto missing = call();
+    const auto response = server.handle_request(missing);
+    const auto* error = std::get_if<cppmcp::core::ErrorResponse>(&response);
+    CPPMCP_CHECK(error != nullptr);
+    if (error) CPPMCP_CHECK(error->error.code == -32021);
+    for (const auto& definition : {Json{{"type", "object"}}, Json{{"type", "string"}, {"format", "password"}}}) {
+        CPPMCP_CHECK(rejects([&] { cppmcp::core::validate_elicitation_form_schema(
+            {{"type", "object"}, {"properties", {{"value", definition}}}}); }));
+    }
+    CPPMCP_CHECK(rejects([&] { cppmcp::core::validate_elicitation_form_schema(
+        {{"type", "object"}, {"properties", {{"api_token", {{"type", "string"}}}}}}); }));
+}
+
+void test_mrtr_generic() {
+    cppmcp::Server server;
+    cppmcp::ToolDefinition tool;
+    tool.name = "confirm";
+    server.add_tool(tool, [](const Json&, const Json&, cppmcp::ToolContext& context) {
+        return context.input_responses().empty()
+            ? cppmcp::ToolResult::input_required({{"roots", {{"method", "roots/list"}, {"params", Json::object()}}}}).to_json()
+            : cppmcp::ToolResult::structured(context.input_responses()["roots"]["roots"]).to_json();
+    });
+    cppmcp::Client::CallToolOptions options;
+    options.client_capabilities = {{"roots", Json::object()}};
+    options.on_input = [](const std::string& id, const Json& request) {
+        CPPMCP_CHECK(id == "roots");
+        CPPMCP_CHECK(request["method"] == "roots/list");
+        return Json{{"roots", Json::array({{{"uri", "file:///workspace"}}})}};
+    };
+    CPPMCP_CHECK(run_client(server, options)["structuredContent"][0]["uri"] == "file:///workspace");
+    const auto response = server.handle_request(call());
+    const auto* error = std::get_if<cppmcp::core::ErrorResponse>(&response);
+    CPPMCP_CHECK(error != nullptr);
+    if (error) CPPMCP_CHECK(error->error.code == -32021);
+}

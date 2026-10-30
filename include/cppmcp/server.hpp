@@ -16,6 +16,7 @@
 #include "cppmcp/core/json_rpc.hpp"
 #include "cppmcp/core/json_schema.hpp"
 #include "cppmcp/core/meta.hpp"
+#include "cppmcp/core/request_state.hpp"
 #include "cppmcp/core/version.hpp"
 #include "cppmcp/transport/http_server.hpp"
 
@@ -31,6 +32,22 @@ struct ServerInfo {
     std::string name;
     std::string title;
     std::string version;
+};
+
+class IRequestStateSubjectProvider {
+public:
+    virtual ~IRequestStateSubjectProvider() = default;
+    virtual std::string subject(const core::Request& request) const = 0;
+};
+
+struct ServerOptions {
+    core::SchemaValidationLimits schema_limits;
+    std::vector<core::RequestStateKey> request_state_keys;
+    std::chrono::seconds request_state_ttl{600};
+    std::size_t max_request_state_bytes = 8192;
+    std::size_t max_mrtr_rounds = 10;
+    std::shared_ptr<const core::IRequestStateCodec> request_state_codec;
+    std::shared_ptr<const IRequestStateSubjectProvider> subject_provider;
 };
 
 struct ToolAnnotation {
@@ -85,7 +102,8 @@ public:
                 const nlohmann::json& request_params = nlohmann::json::object(),
                 std::chrono::milliseconds minimum_notification_interval =
                     std::chrono::milliseconds(0),
-                std::size_t maximum_notifications = 100);
+                std::size_t maximum_notifications = 100,
+                nlohmann::json client_capabilities = nlohmann::json::object());
 
     void emit(nlohmann::json event) const;
     void report_progress(double progress, std::optional<double> total = std::nullopt,
@@ -95,6 +113,13 @@ public:
              nlohmann::json data) const;
     void set_log_level(std::string level);
     void finish() noexcept;
+    [[nodiscard]] const nlohmann::json& input_responses() const noexcept;
+    void set_input_responses(nlohmann::json responses);
+    [[nodiscard]] const std::string& request_state() const noexcept;
+    [[nodiscard]] const nlohmann::json& state() const noexcept;
+    void set_state(nlohmann::json state);
+    [[nodiscard]] const nlohmann::json& client_capabilities() const noexcept;
+    void set_client_capabilities(nlohmann::json capabilities);
     bool cancelled() const noexcept;
     std::stop_token cancellation_token() const noexcept;
 
@@ -110,6 +135,10 @@ private:
     mutable std::optional<double> last_progress_;
     mutable std::chrono::steady_clock::time_point last_notification_{};
     bool finished_ = false;
+    nlohmann::json input_responses_ = nlohmann::json::object();
+    nlohmann::json state_ = nlohmann::json::object();
+    std::string request_state_;
+    nlohmann::json client_capabilities_ = nlohmann::json::object();
 };
 
 using ContextToolHandler =
@@ -145,6 +174,12 @@ struct ToolResult {
     nlohmann::json to_json() const {
         return {{"__cppmcp_tool_result", true}, {"payload", payload}, {"isError", is_error}};
     }
+    static ToolResult input_required(nlohmann::json input_requests,
+                                     nlohmann::json private_state = nlohmann::json::object()) {
+        return ToolResult{{{"resultType", "input_required"},
+                           {"inputRequests", std::move(input_requests)},
+                           {"privateState", std::move(private_state)}}, false};
+    }
     operator nlohmann::json() const { return to_json(); }
 };
 
@@ -152,6 +187,7 @@ class Server {
 public:
     explicit Server(ServerInfo info = {"cppmcp", "cppmcp", "0.1.0"},
                     core::SchemaValidationLimits schema_limits = {});
+    Server(ServerInfo info, ServerOptions options);
 
     void add_tool(ToolDefinition tool);
     void add_tool(ToolDefinition tool, ContextToolHandler context_handler);
@@ -195,6 +231,10 @@ private:
     core::SchemaValidationLimits schema_limits_;
     std::atomic_bool validate_output_{true};
     std::optional<std::string> legacy_log_level_;
+    std::shared_ptr<const core::IRequestStateCodec> request_state_codec_;
+    std::shared_ptr<const IRequestStateSubjectProvider> subject_provider_;
+    std::size_t max_mrtr_rounds_ = 10;
+    nlohmann::json legacy_client_capabilities_ = nlohmann::json::object();
     std::shared_ptr<transport::SubscriptionRegistry> subscriptions_;
 
     friend class transport::McpHttpHandler;

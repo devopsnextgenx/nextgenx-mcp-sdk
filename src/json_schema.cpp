@@ -310,4 +310,37 @@ std::shared_ptr<ISchemaValidator> make_json_schema_validator() {
     return std::make_shared<JsonSchemaValidator>();
 }
 
+void validate_elicitation_form_schema(const nlohmann::json& schema) {
+    if (!schema.is_object() || schema.value("type", std::string{}) != "object" ||
+        !schema.contains("properties") || !schema["properties"].is_object()) {
+        throw std::invalid_argument("Elicitation requires flat object properties");
+    }
+    for (auto property = schema["properties"].begin(); property != schema["properties"].end(); ++property) {
+        auto name = property.key();
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char ch) {
+            return ch >= 'A' && ch <= 'Z' ? static_cast<char>(ch + ('a' - 'A')) : static_cast<char>(ch);
+        });
+        const auto& definition = property.value();
+        if (name.find("password") != std::string::npos || name.find("secret") != std::string::npos ||
+            name.find("token") != std::string::npos || name.find("passphrase") != std::string::npos ||
+            name.find("api_key") != std::string::npos || name.find("apikey") != std::string::npos ||
+            !definition.is_object() || definition.value("writeOnly", false) ||
+            definition.value("format", std::string{}) == "password") {
+            throw std::invalid_argument("Sensitive input requires URL elicitation");
+        }
+        const auto type = definition.value("type", std::string{});
+        if (type != "string" && type != "number" && type != "integer" && type != "boolean" &&
+            type != "array") {
+            throw std::invalid_argument("Elicitation fields must be primitive values");
+        }
+        if (definition.contains("$ref") || definition.contains("properties") ||
+            (type == "array" && (!definition.contains("items") ||
+             !definition["items"].is_object() ||
+             definition["items"].value("type", std::string{}) != "string" ||
+             (!definition["items"].contains("enum") && !definition["items"].contains("anyOf"))))) {
+            throw std::invalid_argument("Nested elicitation fields are not supported");
+        }
+    }
+}
+
 }  // namespace cppmcp::core

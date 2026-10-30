@@ -33,6 +33,7 @@ struct LegacySession {
     std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
     bool active = true;
+    Json capabilities = Json::object();
 };
 
 std::mutex& legacy_session_mutex() {
@@ -592,6 +593,12 @@ void send_response(IHttpExchange& exchange, const HttpHandlerOptions& options,
                    bool accept_json, bool accept_sse, const Message& message,
                    SseStream* stream = nullptr) {
     const auto json = core::serialize_message(message);
+    const auto* error = std::get_if<core::ErrorResponse>(&message);
+    if (stream == nullptr && error != nullptr && error->error.code ==
+        static_cast<std::int32_t>(ErrorCode::missing_required_client_capability)) {
+        exchange.respond(400, {{"Content-Type", "application/json"}}, json);
+        return;
+    }
     if (stream != nullptr) {
         stream->write_event(json);
         stream->close();
@@ -902,6 +909,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             {
                 std::lock_guard<std::mutex> lock(legacy_session_mutex());
                 legacy_sessions()[sid] = LegacySession{sid, "2025-11-25"};
+                legacy_sessions()[sid].capabilities = rpc_request.params.value(
+                    "capabilities", Json::object());
             }
             server_.subscriptions_->register_legacy_session(sid, true);
             const auto response = core::ResultResponse{rpc_request.id, std::move(result)};
@@ -914,6 +923,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                           core::protocol_error(ErrorCode::invalid_request, "Missing Mcp-Session-Id"));
             return;
         }
+        Json legacy_capabilities = Json::object();
         {
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
             const auto it = legacy_sessions().find(*session_id);
@@ -924,6 +934,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                 return;
             }
             it->second.last_seen = std::chrono::steady_clock::now();
+            legacy_capabilities = it->second.capabilities;
         }
         if (version_header && *version_header == "1999-01-01") {
             respond_error(*exchange, 400,
@@ -950,7 +961,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             }
             start_sse().write_event(event.dump());
         }, rpc_request.params, options_.notification_min_interval,
-           options_.max_notifications_per_request);
+              options_.max_notifications_per_request, std::move(legacy_capabilities));
         auto response = server_.handle_message(message, &context);
         context.finish();
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {
@@ -1138,9 +1149,6 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         }
         return *stream;
     };
-    if (options_.response_mode == HttpResponseMode::sse_only) {
-        start_sse();
-    }
     const bool can_emit_sse = options_.response_mode != HttpResponseMode::json_only && accept_sse;
     ToolContext context(cancellation->get_token(), [&](Json event) {
         if (!can_emit_sse) {

@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(OpenSSL 3 COMPONENTS Crypto)
 if(@CPPMCP_WITH_TLS@)
     find_dependency(OpenSSL 3 COMPONENTS SSL Crypto)
 endif()

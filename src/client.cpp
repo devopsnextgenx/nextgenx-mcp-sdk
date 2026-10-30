@@ -113,9 +113,15 @@ nlohmann::json Client::call_tool(const std::string& name, const nlohmann::json& 
     }
     const auto call_id = "call-" + std::to_string(
         next_progress_token_.fetch_add(1, std::memory_order_relaxed));
-    nlohmann::json client_capabilities = nlohmann::json::object();
+    if (!options.client_capabilities.is_object() || options.timeout.count() <= 0) {
+        throw std::invalid_argument("Tool call requires object capabilities and a positive timeout");
+    }
+    auto client_capabilities = options.client_capabilities;
     if (options.on_elicit) {
         client_capabilities["elicitation"] = {{"form", nlohmann::json::object()}};
+        if (options.allow_url_elicitation) {
+            client_capabilities["elicitation"]["url"] = nlohmann::json::object();
+        }
     }
     nlohmann::json meta = {
         {"io.modelcontextprotocol/protocolVersion", "2026-07-28"},
@@ -136,16 +142,29 @@ nlohmann::json Client::call_tool(const std::string& name, const nlohmann::json& 
     try {
         nlohmann::json request_params = {
             {"name", name}, {"arguments", args}, {"_meta", std::move(meta)}};
+        const auto original_params = request_params;
+        const auto deadline = std::chrono::steady_clock::now() + options.timeout;
         for (std::size_t round = 0;; ++round) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                throw std::runtime_error("Tool call timed out during input continuation");
+            }
             auto future = connection_->send_request("tools/call", request_params,
-                                                    options.timeout);
+                                                    remaining);
             auto result = future.get();
             if (result.value("resultType", std::string("complete")) != "input_required") {
                 std::lock_guard<std::mutex> lock(tool_callbacks_mutex_);
                 active_tool_calls_.erase(call_id);
                 return result;
             }
-            if (!options.on_elicit) {
+            const auto requests = result.value("inputRequests", nlohmann::json::object());
+            if (!requests.is_object() ||
+                (!result.contains("inputRequests") && !result.contains("requestState")) ||
+                (result.contains("requestState") && !result["requestState"].is_string())) {
+                throw std::runtime_error("Invalid input-required result");
+            }
+            if (!requests.empty() && !options.on_elicit && !options.on_input) {
                 std::lock_guard<std::mutex> lock(tool_callbacks_mutex_);
                 active_tool_calls_.erase(call_id);
                 return result;
@@ -155,26 +174,23 @@ nlohmann::json Client::call_tool(const std::string& name, const nlohmann::json& 
             }
 
             nlohmann::json responses = nlohmann::json::object();
-            const auto requests = result.value("inputRequests", nlohmann::json::object());
-            if (requests.is_object()) {
-                for (auto item = requests.begin(); item != requests.end(); ++item) {
+            for (auto item = requests.begin(); item != requests.end(); ++item) {
+                if (options.on_input) {
+                    responses[item.key()] = options.on_input(item.key(), item.value());
+                } else if (item.value().value("method", std::string{}) == "elicitation/create") {
+                    const auto& params = item.value().at("params");
+                    const auto mode = params.value("mode", std::string("form"));
+                    if (mode == "form") {
+                        core::validate_elicitation_form_schema(params.at("requestedSchema"));
+                    } else if (mode != "url" || !options.allow_url_elicitation) {
+                        throw std::runtime_error("Unsupported elicitation mode");
+                    }
                     responses[item.key()] = options.on_elicit(item.key(), item.value());
+                } else {
+                    throw std::runtime_error("No handler for input request method");
                 }
             }
-            request_params = {{"name", name}, {"arguments", args}, {"_meta", {
-                                  {"io.modelcontextprotocol/protocolVersion", "2026-07-28"},
-                                  {"io.modelcontextprotocol/clientCapabilities",
-                                   {{"elicitation", {{"form", nlohmann::json::object()}}}}},
-                                  {"io.modelcontextprotocol/clientInfo",
-                                   {{"name", info_.name}, {"title", info_.title},
-                                    {"version", info_.version}}}}}};
-            if (options.on_progress) {
-                request_params["_meta"]["progressToken"] = call_id;
-            }
-            if (!options.log_level.empty()) {
-                request_params["_meta"]["io.modelcontextprotocol/logLevel"] =
-                    options.log_level;
-            }
+            request_params = original_params;
             if (!responses.empty()) {
                 request_params["inputResponses"] = std::move(responses);
             }

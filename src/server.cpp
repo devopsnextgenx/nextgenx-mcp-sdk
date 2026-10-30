@@ -128,7 +128,25 @@ Server::Server(ServerInfo info, core::SchemaValidationLimits schema_limits)
     : info_(std::move(info)),
       schema_validator_(core::make_json_schema_validator()),
       schema_limits_(schema_limits),
+      request_state_codec_(std::make_shared<core::HmacRequestStateCodec>(
+          std::vector<core::RequestStateKey>{})),
       subscriptions_(std::make_shared<transport::SubscriptionRegistry>()) {}
+
+Server::Server(ServerInfo info, ServerOptions options)
+    : info_(std::move(info)),
+      schema_validator_(core::make_json_schema_validator()),
+      schema_limits_(options.schema_limits),
+      request_state_codec_(options.request_state_codec ? std::move(options.request_state_codec) :
+          std::make_shared<core::HmacRequestStateCodec>(
+          std::move(options.request_state_keys), options.request_state_ttl,
+          options.max_request_state_bytes)),
+      subject_provider_(std::move(options.subject_provider)),
+      max_mrtr_rounds_(options.max_mrtr_rounds),
+      subscriptions_(std::make_shared<transport::SubscriptionRegistry>()) {
+    if (max_mrtr_rounds_ == 0) {
+        throw std::invalid_argument("max_mrtr_rounds must be greater than zero");
+    }
+}
 
 void Server::notify_tools_list_changed() {
     subscriptions_->notify_tools_list_changed();
@@ -220,12 +238,21 @@ ToolContext::ToolContext(std::stop_token cancellation,
                          std::function<void(nlohmann::json)> emitter,
                          const nlohmann::json& request_params,
                          std::chrono::milliseconds minimum_notification_interval,
-                         std::size_t maximum_notifications)
+                                                 std::size_t maximum_notifications,
+                                                 nlohmann::json client_capabilities)
     : cancellation_(cancellation),
       emitter_(std::move(emitter)),
       minimum_notification_interval_(minimum_notification_interval),
-      maximum_notifications_(maximum_notifications) {
-    const auto meta = core::meta::get_meta(request_params);
+            maximum_notifications_(maximum_notifications),
+            input_responses_(request_params.value("inputResponses", nlohmann::json::object())),
+            request_state_(request_params.contains("requestState") && request_params["requestState"].is_string()
+                         ? request_params["requestState"].get<std::string>() : std::string{}),
+            client_capabilities_(std::move(client_capabilities)) {
+        const auto meta = core::meta::get_meta(request_params);
+        if (client_capabilities_.empty()) {
+                client_capabilities_ = meta.value("io.modelcontextprotocol/clientCapabilities",
+                                                                                 nlohmann::json::object());
+        }
     const auto token = meta.find("progressToken");
     if (token != meta.end() && (token->is_string() || token->is_number_integer())) {
         progress_token_ = *token;
@@ -325,6 +352,36 @@ void ToolContext::set_log_level(std::string level) {
 void ToolContext::finish() noexcept {
     std::lock_guard<std::mutex> lock(emission_mutex_);
     finished_ = true;
+}
+
+const nlohmann::json& ToolContext::input_responses() const noexcept {
+    return input_responses_;
+}
+
+void ToolContext::set_input_responses(nlohmann::json responses) {
+    input_responses_ = responses.is_object() ? std::move(responses)
+                                             : nlohmann::json::object();
+}
+
+const std::string& ToolContext::request_state() const noexcept {
+    return request_state_;
+}
+
+const nlohmann::json& ToolContext::state() const noexcept {
+    return state_;
+}
+
+void ToolContext::set_state(nlohmann::json state) {
+    state_ = std::move(state);
+}
+
+const nlohmann::json& ToolContext::client_capabilities() const noexcept {
+    return client_capabilities_;
+}
+
+void ToolContext::set_client_capabilities(nlohmann::json capabilities) {
+    client_capabilities_ = capabilities.is_object() ? std::move(capabilities)
+                                                     : nlohmann::json::object();
 }
 
 bool ToolContext::cancelled() const noexcept {
@@ -467,6 +524,10 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     }
 
     if (method == "initialize") {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            legacy_client_capabilities_ = request.params.value("capabilities", nlohmann::json::object());
+        }
         return core::ResultResponse{request.id,
                                     {{"protocolVersion", "2025-11-25"},
                                      {"capabilities", {{"tools", {{"listChanged", true}}},
@@ -563,6 +624,79 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             return core::ResultResponse{request.id, std::move(payload)};
         };
 
+        ToolContext fallback({}, {}, request.params);
+        auto& tool_context = context == nullptr ? fallback : *context;
+        if (version.empty() && tool_context.client_capabilities().empty()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            tool_context.set_client_capabilities(legacy_client_capabilities_);
+        }
+        core::RequestStateBinding binding;
+        binding.method = method;
+        binding.name = name;
+        binding.params = request.params;
+        binding.subject = subject_provider_ ? subject_provider_->subject(request) : "anonymous";
+        std::size_t round = 0;
+        try {
+            const auto responses = request.params.value("inputResponses", nlohmann::json::object());
+            if (!responses.is_object()) {
+                throw std::invalid_argument("inputResponses must be an object");
+            }
+            if (request.params.contains("requestState")) {
+                const auto claims = request_state_codec_->verify(
+                    request.params.at("requestState").get<std::string>(), binding);
+                if (claims.round > max_mrtr_rounds_) {
+                    throw std::invalid_argument("TooManyRounds: continuation limit reached");
+                }
+                round = claims.round;
+                const auto& pending = claims.private_payload.at("inputRequests");
+                for (auto response = responses.begin(); response != responses.end(); ++response) {
+                    if (std::find(claims.input_request_ids.begin(), claims.input_request_ids.end(),
+                                  response.key()) == claims.input_request_ids.end()) {
+                        throw std::invalid_argument("Unknown input response ID");
+                    }
+                    const auto& value = response.value();
+                    const auto& pending_request = pending.at(response.key());
+                    const auto input_method = pending_request.at("method").get<std::string>();
+                    if (input_method != "elicitation/create") {
+                        if (!value.is_object() ||
+                            (input_method == "roots/list" &&
+                             (!value.contains("roots") || !value["roots"].is_array())) ||
+                            (input_method == "sampling/createMessage" &&
+                             (!value.contains("model") || !value["model"].is_string() ||
+                              !value.contains("role") || !value["role"].is_string() ||
+                              !value.contains("content")))) {
+                            throw std::invalid_argument("Invalid input response");
+                        }
+                        continue;
+                    }
+                    if (!value.is_object() || !value.contains("action") ||
+                        !value["action"].is_string()) {
+                        throw std::invalid_argument("Input response requires an action");
+                    }
+                    const auto action = value["action"].get<std::string>();
+                    if (action != "accept" && action != "decline" && action != "cancel") {
+                        throw std::invalid_argument("Invalid elicitation action");
+                    }
+                    const auto& params = pending.at(response.key()).at("params");
+                    if (action == "accept" && params.value("mode", std::string("form")) == "form") {
+                        const auto validator = schema_validator_->compile(
+                            params.at("requestedSchema"), schema_limits_);
+                        if (!value.contains("content") || validator->validate(value.at("content"))) {
+                            throw std::invalid_argument("Invalid elicitation response content");
+                        }
+                    }
+                }
+                tool_context.set_state(claims.private_payload.at("state"));
+            } else if (!responses.empty()) {
+                throw std::invalid_argument("inputResponses requires requestState");
+            }
+            tool_context.set_input_responses(responses);
+        } catch (const std::exception&) {
+            return core::ErrorResponse{request.id,
+                core::protocol_error(core::ErrorCode::invalid_params,
+                                     "Invalid tool continuation")};
+        }
+
         CPPMCP_LOG_DEBUG("calling tool '" << name << "'");
         if (context != nullptr && version.empty()) {
             std::optional<std::string> level;
@@ -591,9 +725,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
         nlohmann::json result;
         try {
             if (context_handler) {
-                ToolContext fallback;
-                result = context_handler(arguments, request.params,
-                                         context == nullptr ? fallback : *context);
+                result = context_handler(arguments, request.params, tool_context);
             } else {
                 result = handler(arguments, request.params);
             }
@@ -613,10 +745,83 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
         if (explicit_tool_result) {
             payload = std::move(result["payload"]);
             is_error = result.value("isError", false);
+        } else if (result.is_object() &&
+                   result.value("resultType", std::string{}) == "input_required") {
+            payload = std::move(result);
         } else {
             payload = {{"content", nlohmann::json::array(
                                         {{{"type", "text"}, {"text", result.dump()}}})},
                        {"structuredContent", result}};
+        }
+        if (payload.value("resultType", std::string{}) == "input_required") {
+            try {
+                const auto requests = payload.value("inputRequests", nlohmann::json::object());
+                if (!requests.is_object()) {
+                    throw std::invalid_argument("inputRequests must be an object");
+                }
+                const auto capabilities = tool_context.client_capabilities();
+                const auto elicitation = capabilities.value("elicitation", nlohmann::json::object());
+                for (auto input = requests.begin(); input != requests.end(); ++input) {
+                    if (input.key().empty() || !input.value().is_object()) {
+                        throw std::invalid_argument("Unsupported input request");
+                    }
+                    const auto input_method = input.value().value("method", std::string{});
+                    if (input_method != "elicitation/create") {
+                        const auto capability = input_method == "roots/list" ? "roots" :
+                            input_method == "sampling/createMessage" ? "sampling" : "";
+                        if (std::string_view(capability).empty()) {
+                            throw std::invalid_argument("Unsupported input request method");
+                        }
+                        if (!capabilities.contains(capability) || !capabilities[capability].is_object()) {
+                            return core::ErrorResponse{request.id,
+                                core::protocol_error(core::ErrorCode::missing_required_client_capability,
+                                    "Client does not support the required input method",
+                                    {{"requiredCapabilities", {{capability, nlohmann::json::object()}}}})};
+                        }
+                        binding.input_request_ids.push_back(input.key());
+                        continue;
+                    }
+                    const auto& params = input.value().at("params");
+                    const auto mode = params.value("mode", std::string("form"));
+                    if (mode != "form" && mode != "url") {
+                        throw std::invalid_argument("Invalid elicitation mode");
+                    }
+                    if (!elicitation.is_object() || !elicitation.contains(mode) || !elicitation[mode].is_object()) {
+                        return core::ErrorResponse{request.id,
+                            core::protocol_error(core::ErrorCode::missing_required_client_capability,
+                                "Client does not support the required elicitation mode",
+                                {{"requiredCapabilities", {{"elicitation", {{mode, nlohmann::json::object()}}}}}})};
+                    }
+                    if (!params.contains("message") || !params["message"].is_string()) {
+                        throw std::invalid_argument("Elicitation requires a message");
+                    }
+                    if (mode == "form") {
+                        const auto& schema = params.at("requestedSchema");
+                        core::validate_elicitation_form_schema(schema);
+                        (void)schema_validator_->compile(schema, schema_limits_);
+                    } else if (!params.contains("url") || !params["url"].is_string() ||
+                               !params["url"].get_ref<const std::string&>().starts_with("https://")) {
+                        throw std::invalid_argument("URL elicitation requires an HTTPS URL");
+                    }
+                    binding.input_request_ids.push_back(input.key());
+                }
+                if (round >= max_mrtr_rounds_) {
+                    return core::ErrorResponse{request.id,
+                        core::protocol_error(core::ErrorCode::invalid_params,
+                                             "TooManyRounds: continuation limit reached")};
+                }
+                binding.round = round + 1;
+                binding.private_payload = {
+                    {"state", payload.value("privateState", tool_context.state())},
+                    {"inputRequests", requests}};
+                payload.erase("privateState");
+                payload["requestState"] = request_state_codec_->issue(binding);
+                return core::ResultResponse{request.id, std::move(payload)};
+            } catch (const std::exception&) {
+                return core::ErrorResponse{request.id,
+                    core::protocol_error(core::ErrorCode::internal_error,
+                                         "Invalid input-required tool result")};
+            }
         }
         if (is_error) {
             payload["isError"] = true;

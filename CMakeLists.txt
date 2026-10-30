@@ -13,6 +13,9 @@ option(CPPMCP_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(CPPMCP_ENABLE_LEGACY "Enable legacy protocol support" ON)
 option(CPPMCP_OFFLINE "Do not fetch dependencies from the network" OFF)
 find_package(OpenSSL 3 QUIET)
+if(NOT TARGET OpenSSL::Crypto)
+    message(FATAL_ERROR "OpenSSL 3 Crypto is required for authenticated requestState support")
+endif()
 if(OpenSSL_FOUND)
     set(CPPMCP_TLS_DEFAULT ON)
 else()
@@ -68,6 +71,7 @@ FetchContent_MakeAvailable(llhttp)
 set(CPPMCP_SOURCES
     src/json_rpc.cpp
     src/json_schema.cpp
+    src/request_state.cpp
     src/version.cpp
     src/connection.cpp
 )
@@ -134,6 +138,7 @@ if(CPPMCP_BUILD_STATIC)
     add_library(cppmcp_core STATIC ${CPPMCP_SOURCES})
     add_library(cppmcp::core ALIAS cppmcp_core)
     cppmcp_configure_library(cppmcp_core)
+    target_link_libraries(cppmcp_core PUBLIC OpenSSL::Crypto)
     set_target_properties(cppmcp_core PROPERTIES EXPORT_NAME core)
 
     add_library(cppmcp_server STATIC ${CPPMCP_SERVER_SOURCES})
@@ -223,6 +228,7 @@ if(CPPMCP_BUILD_SHARED)
     add_library(cppmcp_core_shared SHARED ${CPPMCP_SOURCES})
     add_library(cppmcp::core_shared ALIAS cppmcp_core_shared)
     cppmcp_configure_library(cppmcp_core_shared)
+    target_link_libraries(cppmcp_core_shared PUBLIC OpenSSL::Crypto)
     set_target_properties(cppmcp_core_shared PROPERTIES
         EXPORT_NAME core_shared
         OUTPUT_NAME cppmcp_core_shared
@@ -298,6 +304,7 @@ if(CPPMCP_BUILD_TESTS)
         tests/test_main.cpp
         tests/json_rpc_test.cpp
         tests/schema_validation_test.cpp
+        tests/mrtr_test.cpp
         tests/version_test.cpp
         tests/schema_contract_test.cpp
         tests/phase2_test.cpp
@@ -327,6 +334,8 @@ if(CPPMCP_BUILD_TESTS)
     )
         foreach(test_name IN ITEMS
             json_rpc versions schema_contract schema_register schema_limits output_schema
+            mrtr elicit request_state two_instance
+            mrtr_client elicit_url mrtr_generic
             progress logging
             phase2_memory phase2_stdio
             http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types
