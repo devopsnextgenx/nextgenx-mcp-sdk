@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <limits>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -24,11 +26,11 @@ struct RegexGroup {
     bool has_alternation = false;
 };
 
-bool is_unbounded_quantifier(std::string_view pattern, std::size_t position) {
+bool is_repetition(std::string_view pattern, std::size_t position) {
     if (position >= pattern.size()) {
         return false;
     }
-    if (pattern[position] == '*' || pattern[position] == '+') {
+    if (pattern[position] == '*' || pattern[position] == '+' || pattern[position] == '?') {
         return true;
     }
     if (pattern[position] != '{') {
@@ -38,8 +40,7 @@ bool is_unbounded_quantifier(std::string_view pattern, std::size_t position) {
     if (close == std::string_view::npos) {
         return false;
     }
-    return pattern.substr(position + 1, close - position - 1).find(',') !=
-           std::string_view::npos;
+    return true;
 }
 
 bool has_risky_repetition(std::string_view pattern) {
@@ -48,6 +49,11 @@ bool has_risky_repetition(std::string_view pattern) {
     for (std::size_t index = 0; index < pattern.size(); ++index) {
         const char ch = pattern[index];
         if (ch == '\\') {
+            if (index + 1 < pattern.size() &&
+                ((pattern[index + 1] >= '1' && pattern[index + 1] <= '9') ||
+                 pattern[index + 1] == 'k' || pattern[index + 1] == 'p' || pattern[index + 1] == 'P')) {
+                return true;
+            }
             ++index;
             continue;
         }
@@ -60,6 +66,9 @@ bool has_risky_repetition(std::string_view pattern) {
         if (ch == '[') {
             in_character_class = true;
         } else if (ch == '(') {
+            if (index + 1 < pattern.size() && pattern[index + 1] == '?') {
+                return true;
+            }
             groups.push_back({});
         } else if (ch == '|') {
             groups.back().has_alternation = true;
@@ -70,7 +79,7 @@ bool has_risky_repetition(std::string_view pattern) {
             const auto group = groups.back();
             groups.pop_back();
             const bool repeated = index + 1 < pattern.size() &&
-                                  is_unbounded_quantifier(pattern, index + 1);
+                                  is_repetition(pattern, index + 1);
             if (repeated && (group.has_unbounded_quantifier || group.has_alternation)) {
                 return true;
             }
@@ -84,7 +93,23 @@ bool has_risky_repetition(std::string_view pattern) {
             }
             groups.back().has_alternation =
                 groups.back().has_alternation || group.has_alternation;
-        } else if (is_unbounded_quantifier(pattern, index)) {
+        } else if (is_repetition(pattern, index)) {
+            if (ch == '{') {
+                auto cursor = index + 1;
+                while (cursor < pattern.size() && pattern[cursor] != '}') {
+                    if (pattern[cursor] == ',') {
+                        ++cursor;
+                        continue;
+                    }
+                    unsigned count = 0;
+                    const auto parsed = std::from_chars(pattern.data() + cursor,
+                                                         pattern.data() + pattern.size(), count);
+                    if (parsed.ec != std::errc{} || count > 256 || parsed.ptr == pattern.data() + cursor) {
+                        return true;
+                    }
+                    cursor = static_cast<std::size_t>(parsed.ptr - pattern.data());
+                }
+            }
             if (groups.back().has_unbounded_quantifier) {
                 return true;
             }
@@ -92,6 +117,64 @@ bool has_risky_repetition(std::string_view pattern) {
         }
     }
     return false;
+}
+
+template <typename Visitor>
+void visit_subschemas(const Json& schema, Visitor visitor) {
+    for (const auto* keyword : {"additionalProperties", "unevaluatedProperties", "propertyNames",
+                                "contains", "additionalItems", "unevaluatedItems", "not", "if",
+                                "then", "else", "contentSchema"}) {
+        const auto child = schema.find(keyword);
+        if (child != schema.end()) visitor(*child);
+    }
+    for (const auto* keyword : {"properties", "patternProperties", "$defs", "definitions",
+                                "dependentSchemas", "dependencies"}) {
+        const auto children = schema.find(keyword);
+        if (children != schema.end() && children->is_object()) {
+            for (const auto& child : *children) {
+                if (!child.is_array()) visitor(child);
+            }
+        }
+    }
+    for (const auto* keyword : {"allOf", "anyOf", "oneOf", "prefixItems", "items"}) {
+        const auto children = schema.find(keyword);
+        if (children != schema.end()) {
+            if (children->is_array()) {
+                for (const auto& child : *children) visitor(child);
+            } else {
+                visitor(*children);
+            }
+        }
+    }
+}
+
+void inspect_schema_depth(const Json& value, std::size_t depth, std::size_t limit) {
+    if (depth > limit) {
+        throw std::invalid_argument("schema nesting exceeds the configured depth limit");
+    }
+    if (value.is_structured()) {
+        for (const auto& child : value) inspect_schema_depth(child, depth + 1, limit);
+    }
+}
+
+std::string decode_fragment(std::string_view fragment) {
+    std::string result;
+    for (std::size_t index = 0; index < fragment.size(); ++index) {
+        if (fragment[index] == '%') {
+            if (index + 2 >= fragment.size()) throw std::invalid_argument("Invalid $ref fragment");
+            unsigned byte = 0;
+            const auto parsed = std::from_chars(fragment.data() + index + 1,
+                                                fragment.data() + index + 3, byte, 16);
+            if (parsed.ec != std::errc{} || parsed.ptr != fragment.data() + index + 3) {
+                throw std::invalid_argument("Invalid $ref fragment");
+            }
+            result.push_back(static_cast<char>(byte));
+            index += 2;
+        } else {
+            result.push_back(fragment[index]);
+        }
+    }
+    return result;
 }
 
 void inspect_patterns(const Json& node, const SchemaValidationLimits& limits,
@@ -120,30 +203,38 @@ void inspect_patterns(const Json& node, const SchemaValidationLimits& limits,
                         "schema patternProperties exceeds the safe regex subset");
                 }
                 has_patterns = true;
-                inspect_patterns(item.value(), limits, has_patterns);
             }
         }
-        for (auto item = node.begin(); item != node.end(); ++item) {
-            if (item.key() != "patternProperties") {
-                inspect_patterns(item.value(), limits, has_patterns);
+        visit_subschemas(node, [&](const Json& child) { inspect_patterns(child, limits, has_patterns); });
+    }
+}
+
+void collect_anchors(const Json& node, std::unordered_map<std::string, const Json*>& anchors) {
+    if (!node.is_object()) return;
+    for (const auto* keyword : {"$anchor", "$dynamicAnchor"}) {
+        const auto anchor = node.find(keyword);
+        if (anchor != node.end()) {
+            if (!anchor->is_string()) throw std::invalid_argument("Schema anchors must be strings");
+            const auto [existing, inserted] = anchors.emplace(anchor->get<std::string>(), &node);
+            if (!inserted && existing->second != &node) {
+                throw std::invalid_argument("duplicate schema anchors are disabled");
             }
-        }
-    } else if (node.is_array()) {
-        for (const auto& item : node) {
-            inspect_patterns(item, limits, has_patterns);
         }
     }
+    visit_subschemas(node, [&](const Json& child) { collect_anchors(child, anchors); });
 }
 
 void inspect_references(const Json& root, const Json& node, std::size_t schema_depth,
                         std::size_t reference_depth, const SchemaValidationLimits& limits,
-                        std::unordered_set<std::string>& active_references) {
+                        std::unordered_set<std::string>& active_references,
+                        const std::unordered_map<std::string, const Json*>& anchors) {
     if (schema_depth > limits.max_schema_depth) {
         throw std::invalid_argument("schema nesting exceeds the configured depth limit");
     }
     if (node.is_object()) {
-        const auto ref = node.find("$ref");
-        if (ref != node.end()) {
+        for (const auto* keyword : {"$ref", "$dynamicRef", "$recursiveRef"}) {
+            const auto ref = node.find(keyword);
+            if (ref == node.end()) continue;
             if (!ref->is_string()) {
                 throw std::invalid_argument("schema $ref must be a string");
             }
@@ -154,7 +245,7 @@ void inspect_references(const Json& root, const Json& node, std::size_t schema_d
             if (reference_depth >= limits.max_reference_depth) {
                 throw std::invalid_argument("schema $ref depth exceeds the configured limit");
             }
-            const auto fragment = reference.substr(1);
+            const auto fragment = decode_fragment(std::string_view(reference).substr(1));
             const Json* target = nullptr;
             if (fragment.empty()) {
                 target = &root;
@@ -164,27 +255,23 @@ void inspect_references(const Json& root, const Json& node, std::size_t schema_d
                 } catch (const std::exception&) {
                     throw std::invalid_argument("schema contains an unresolved local $ref");
                 }
+            } else {
+                const auto anchor = anchors.find(fragment);
+                if (anchor != anchors.end()) target = anchor->second;
             }
             if (target != nullptr) {
                 if (!active_references.insert(reference).second) {
                     throw std::invalid_argument("cyclic schema $ref is disabled");
                 }
                 inspect_references(root, *target, 0, reference_depth + 1, limits,
-                                   active_references);
+                                   active_references, anchors);
                 active_references.erase(reference);
             }
         }
-        for (auto item = node.begin(); item != node.end(); ++item) {
-            if (item.key() != "$ref") {
-                inspect_references(root, item.value(), schema_depth + 1, reference_depth,
-                                   limits, active_references);
-            }
-        }
-    } else if (node.is_array()) {
-        for (const auto& item : node) {
-            inspect_references(root, item, schema_depth + 1, reference_depth,
-                               limits, active_references);
-        }
+        visit_subschemas(node, [&](const Json& child) {
+            inspect_references(root, child, schema_depth + 1, reference_depth, limits,
+                               active_references, anchors);
+        });
     }
 }
 
@@ -208,7 +295,8 @@ bool inspect_instance(const Json& value, std::size_t depth, std::size_t& total,
     }
     if (value.is_object()) {
         for (auto item = value.begin(); item != value.end(); ++item) {
-            if (!add_size(item.key().size(), limits.max_instance_bytes, total) ||
+            if ((check_pattern_strings && item.key().size() > limits.max_pattern_input_bytes) ||
+                !add_size(item.key().size(), limits.max_instance_bytes, total) ||
                 !inspect_instance(item.value(), depth + 1, total, limits,
                                   check_pattern_strings)) {
                 return false;
@@ -257,7 +345,11 @@ public:
             return SchemaValidationError{
                 {}, "instance exceeds the configured size, depth, or regex-input limit"};
         }
-        const auto jsoncons_instance = JsonconsJson::parse(instance.dump());
+        const auto instance_text = instance.dump();
+        if (instance_text.size() > limits_.max_instance_bytes) {
+            return SchemaValidationError{{}, "instance exceeds the configured size limit"};
+        }
+        const auto jsoncons_instance = JsonconsJson::parse(instance_text);
         if (schema_.is_valid(jsoncons_instance)) {
             return std::nullopt;
         }
@@ -283,16 +375,19 @@ class JsonSchemaValidator final : public ISchemaValidator {
 public:
     std::shared_ptr<const ICompiledSchema> compile(
         const Json& schema, const SchemaValidationLimits& limits) const override {
-        if (!schema.is_object()) {
-            throw std::invalid_argument("JSON Schema must be an object");
+        if (!schema.is_object() && !schema.is_boolean()) {
+            throw std::invalid_argument("JSON Schema must be an object or boolean");
         }
+        inspect_schema_depth(schema, 0, limits.max_schema_depth);
         const auto schema_text = schema.dump();
         if (schema_text.size() > limits.max_schema_bytes) {
             throw std::invalid_argument("schema exceeds the configured size limit");
         }
         validate_dialect(schema);
         std::unordered_set<std::string> active_references;
-        inspect_references(schema, schema, 0, 0, limits, active_references);
+        std::unordered_map<std::string, const Json*> anchors;
+        collect_anchors(schema, anchors);
+        inspect_references(schema, schema, 0, 0, limits, active_references, anchors);
         bool has_patterns = false;
         inspect_patterns(schema, limits, has_patterns);
 

@@ -1,9 +1,11 @@
 #include "cppmcp/core/request_state.hpp"
 #include "cppmcp/client.hpp"
+#include "cppmcp/transport/stdio.hpp"
 #include "cppmcp/server.hpp"
 #include "test.hpp"
 
 #include <chrono>
+#include <future>
 #include <stdexcept>
 #include <string>
 
@@ -175,6 +177,8 @@ void test_request_state() {
     CPPMCP_CHECK(rejects([&] { codec.verify(token, binding); }));
     now -= seconds(11);
     CPPMCP_CHECK(rejects([&] { codec.verify(token, binding); }));
+    now = system_clock::time_point(seconds(-1000));
+    CPPMCP_CHECK(codec.verify(codec.issue(binding), binding).issued_at == -1000);
     CPPMCP_CHECK(rejects([&] { cppmcp::core::HmacRequestStateCodec invalid(
         std::vector<cppmcp::core::RequestStateKey>{{"key", "bad"}}); }));
     CPPMCP_CHECK(rejects([&] { cppmcp::core::HmacRequestStateCodec invalid({{"key", secret}}, seconds(0)); }));
@@ -291,4 +295,123 @@ void test_mrtr_generic() {
     const auto* error = std::get_if<cppmcp::core::ErrorResponse>(&response);
     CPPMCP_CHECK(error != nullptr);
     if (error) CPPMCP_CHECK(error->error.code == -32021);
+}
+
+void test_legacy_adapter() {
+    cppmcp::Server server;
+    register_tool(server);
+    auto legacy = call();
+    legacy.params.erase("_meta");
+    cppmcp::ToolContext context({}, {}, legacy.params, std::chrono::milliseconds(0), 100,
+                               {{"elicitation", {{"form", Json::object()}}}});
+    int invocations = 0;
+    context.set_input_request_handler([&](const Json& request) {
+        ++invocations;
+        CPPMCP_CHECK(request["method"] == "elicitation/create");
+        return Json{{"action", "accept"}, {"content", {{"confirm", true}}}};
+    });
+    const auto response = server.handle_message(legacy, &context);
+    const auto* result = std::get_if<cppmcp::core::ResultResponse>(&response);
+    CPPMCP_CHECK(result != nullptr);
+    if (result) CPPMCP_CHECK(result->result["structuredContent"]["state"]["checkpoint"] == 7);
+    CPPMCP_CHECK(invocations == 1);
+    CPPMCP_CHECK(!context.request_state().empty());
+    const auto modern = server.handle_message(call(), &context);
+    const auto* pending = std::get_if<cppmcp::core::ResultResponse>(&modern);
+    CPPMCP_CHECK(pending != nullptr);
+    if (pending) CPPMCP_CHECK(pending->result["resultType"] == "input_required");
+    CPPMCP_CHECK(invocations == 1);
+}
+
+void test_http_progress_live() {
+    cppmcp::Server server;
+    std::promise<void> received;
+    auto delivered = received.get_future();
+    bool live = false;
+    cppmcp::ToolDefinition tool;
+    tool.name = "confirm";
+    server.add_tool(tool, [&](const Json&, const Json&, cppmcp::ToolContext& context) {
+        context.report_progress(1, 1);
+        live = delivered.wait_for(std::chrono::seconds(1)) == std::future_status::ready;
+        return Json{{"live", live}};
+    });
+    cppmcp::transport::HttpOptions server_options;
+    server_options.port = 0;
+    auto listener = server.start_http(server_options);
+    cppmcp::HttpClientOptions http_options;
+    http_options.url = "http://127.0.0.1:" + std::to_string(listener->port()) + "/mcp";
+    http_options.policy = cppmcp::NegotiationPolicy::modern_only;
+    cppmcp::Client client;
+    client.connect_http(http_options);
+    cppmcp::Client::CallToolOptions options;
+    options.on_progress = [&](double, std::optional<double>, std::optional<std::string>) { received.set_value(); };
+    const auto result = client.call_tool("confirm", Json::object(), options);
+    CPPMCP_CHECK(result["structuredContent"]["live"] == true);
+    client.close();
+    listener->stop();
+}
+
+void test_http_legacy_elicit() {
+    cppmcp::Server server;
+    register_tool(server);
+    cppmcp::transport::HttpOptions server_options;
+    server_options.port = 0;
+    server_options.handler.input_request_timeout = std::chrono::seconds(2);
+    auto listener = server.start_http(server_options);
+    cppmcp::HttpClientOptions http_options;
+    http_options.url = "http://127.0.0.1:" + std::to_string(listener->port()) + "/mcp";
+    http_options.policy = cppmcp::NegotiationPolicy::legacy_only;
+    http_options.client_capabilities = {{"elicitation", {{"form", Json::object()}}}};
+    cppmcp::Client client;
+    client.connect_http(http_options);
+    cppmcp::Client::CallToolOptions options;
+    options.on_elicit = [](const std::string& id, const Json&) {
+        CPPMCP_CHECK(id.starts_with("server-"));
+        return Json{{"action", "accept"}, {"content", {{"confirm", true}}}};
+    };
+    const auto result = client.call_tool("confirm", Json::object(), options);
+    CPPMCP_CHECK(result["structuredContent"]["state"]["checkpoint"] == 7);
+    CPPMCP_CHECK(!result.contains("resultType"));
+    client.close();
+    listener->stop();
+}
+
+void test_stdio_legacy_elicit() {
+    auto transport = std::make_shared<cppmcp::transport::StdioClientTransport>(
+        cppmcp::transport::StdioProcessSpec{"./cppmcp_stdio_server", {}, {}, "."});
+    cppmcp::core::Connection connection(transport);
+    std::atomic<int> requests{0};
+    connection.set_request_handler([&](const cppmcp::core::Request& input) {
+        ++requests;
+        CPPMCP_CHECK(input.method == "elicitation/create");
+        transport->send(cppmcp::core::ResultResponse{input.id,
+            {{"action", "accept"}, {"content", {{"confirm", true}}}}});
+    });
+    connection.start();
+    (void)connection.send_request("initialize", {{"protocolVersion", "2025-11-25"},
+        {"capabilities", {{"elicitation", {{"form", Json::object()}}}}}}).get();
+    const auto result = connection.send_request("tools/call", {{"name", "delete_project"},
+        {"arguments", {{"project", "stdio"}}}}).get();
+    CPPMCP_CHECK(result["content"][0]["text"] == "deleted stdio");
+    CPPMCP_CHECK(requests.load() == 1);
+    CPPMCP_CHECK(!result.contains("resultType"));
+    connection.close();
+}
+
+void test_request_state_subject() {
+    cppmcp::Server server;
+    register_tool(server);
+    auto request = call();
+    cppmcp::ToolContext first({}, {}, request.params);
+    first.set_request_subject("alice");
+    const auto response = server.handle_request(request, &first);
+    const auto* pending = std::get_if<cppmcp::core::ResultResponse>(&response);
+    CPPMCP_CHECK(pending != nullptr);
+    if (!pending) return;
+    const auto retry = continuation(pending->result);
+    cppmcp::ToolContext other({}, {}, retry.params);
+    other.set_request_subject("bob");
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ErrorResponse>(server.handle_request(retry, &other)));
+    other.set_request_subject("alice");
+    CPPMCP_CHECK(std::holds_alternative<cppmcp::core::ResultResponse>(server.handle_request(retry, &other)));
 }

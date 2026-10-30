@@ -149,7 +149,7 @@ HmacRequestStateCodec::HmacRequestStateCodec(std::vector<RequestStateKey> keys,
 
 std::string HmacRequestStateCodec::issue(const RequestStateBinding& binding) const {
     const auto now = epoch_seconds(clock_());
-    if (ttl_.count() > std::numeric_limits<std::int64_t>::max() - now) {
+    if (now > std::numeric_limits<std::int64_t>::max() - ttl_.count()) {
         throw std::invalid_argument("invalid requestState expiry");
     }
     nlohmann::json payload = {

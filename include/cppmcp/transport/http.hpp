@@ -99,9 +99,11 @@ struct HttpHandlerOptions {
     std::chrono::milliseconds ping_interval{500};
     std::chrono::milliseconds notification_min_interval{0};
     std::size_t max_notifications_per_request = 100;
+    std::chrono::milliseconds input_request_timeout{30000};
     std::vector<std::string> allowed_origins;
     std::vector<std::string> allowed_hosts;
     std::function<bool(const HttpRequest&)> authenticator;
+    std::function<std::string(const HttpRequest&)> request_state_subject;
 };
 
 enum class TlsVersion {

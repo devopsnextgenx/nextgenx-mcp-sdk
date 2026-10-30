@@ -67,6 +67,12 @@ public:
 
 private:
     void handle_server_notification(const core::Notification& notification);
+    void handle_server_request(const core::Request& request);
+
+    struct ActiveToolCall {
+        CallToolOptions options;
+        std::size_t input_requests = 0;
+    };
 
     ClientInfo info_;
     NegotiationPolicy policy_;
@@ -75,7 +81,10 @@ private:
     std::vector<std::function<void()>> listen_closers_;
     std::atomic<std::uint64_t> next_progress_token_{1};
     std::mutex tool_callbacks_mutex_;
-    std::map<std::string, CallToolOptions> active_tool_calls_;
+    std::map<std::string, ActiveToolCall> active_tool_calls_;
+    std::mutex legacy_tool_call_mutex_;
+    std::mutex logging_tool_call_mutex_;
+    bool legacy_transport_ = false;
 };
 
 }  // namespace cppmcp

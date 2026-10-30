@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -34,6 +35,7 @@ struct LegacySession {
     std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
     bool active = true;
     Json capabilities = Json::object();
+    std::map<core::RequestId, std::shared_ptr<std::promise<Json>>> pending_inputs{};
 };
 
 std::mutex& legacy_session_mutex() {
@@ -853,6 +855,34 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
     }
     const auto& message = std::get<Message>(parsed);
 
+    const auto* input_result = std::get_if<core::ResultResponse>(&message);
+    const auto* input_error = std::get_if<core::ErrorResponse>(&message);
+    if (input_result != nullptr || input_error != nullptr) {
+        const auto id = input_result != nullptr ? std::optional<core::RequestId>(input_result->id)
+                                                 : input_error->id;
+        std::shared_ptr<std::promise<Json>> pending;
+        if (session_id && legacy_header_present && options_.mode != HttpMode::modern && id) {
+            std::lock_guard<std::mutex> lock(legacy_session_mutex());
+            const auto session = legacy_sessions().find(*session_id);
+            if (session != legacy_sessions().end()) {
+                const auto found = session->second.pending_inputs.find(*id);
+                if (found != session->second.pending_inputs.end()) {
+                    pending = found->second;
+                    session->second.pending_inputs.erase(found);
+                }
+            }
+        }
+        if (!pending) {
+            respond_error(*exchange, 400, core::protocol_error(ErrorCode::invalid_request,
+                "No matching legacy input request"));
+            return;
+        }
+        if (input_result != nullptr) pending->set_value(input_result->result);
+        else pending->set_exception(std::make_exception_ptr(std::runtime_error("Client rejected input request")));
+        exchange->respond(202, {}, "");
+        return;
+    }
+
     if (std::holds_alternative<core::Notification>(message)) {
         const auto& notification = std::get<core::Notification>(message);
         if (notification.method == "notifications/initialized") {
@@ -943,6 +973,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             return;
         }
         auto cancellation = std::make_shared<std::stop_source>();
+        exchange->on_disconnect([cancellation] { cancellation->request_stop(); });
         SseStream* stream = nullptr;
         const auto start_sse = [&]() -> SseStream& {
             if (stream == nullptr) {
@@ -962,6 +993,47 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             start_sse().write_event(event.dump());
         }, rpc_request.params, options_.notification_min_interval,
               options_.max_notifications_per_request, std::move(legacy_capabilities));
+        if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
+        if (can_emit_sse) {
+            context.set_input_request_handler([&, sid = *session_id](const Json& input) {
+                const core::RequestId id = "server-" + generate_session_id();
+                auto pending = std::make_shared<std::promise<Json>>();
+                auto future = pending->get_future();
+                {
+                    std::lock_guard<std::mutex> lock(legacy_session_mutex());
+                    auto& session = legacy_sessions().at(sid);
+                    if (session.pending_inputs.size() >= 32) throw std::runtime_error("Too many input requests");
+                    session.pending_inputs.emplace(id, pending);
+                }
+                const auto remove_pending = [&] {
+                    std::lock_guard<std::mutex> lock(legacy_session_mutex());
+                    const auto session = legacy_sessions().find(sid);
+                    if (session != legacy_sessions().end()) session->second.pending_inputs.erase(id);
+                };
+                try {
+                    auto params = input.value("params", Json::object());
+                    if (params.value("mode", std::string{}) == "url") {
+                        params["elicitationId"] = std::get<std::string>(id);
+                    }
+                    start_sse().write_event(core::serialize_message(core::Request{
+                        id, input.at("method").get<std::string>(), std::move(params)}));
+                    const auto deadline = std::chrono::steady_clock::now() + options_.input_request_timeout;
+                    while (future.wait_for(std::chrono::milliseconds(25)) != std::future_status::ready) {
+                        if (cancellation->stop_requested() || std::chrono::steady_clock::now() >= deadline) {
+                            throw std::runtime_error("Input request cancelled or timed out");
+                        }
+                        std::lock_guard<std::mutex> lock(legacy_session_mutex());
+                        if (!legacy_sessions().contains(sid)) throw std::runtime_error("Session closed");
+                    }
+                    auto result = future.get();
+                    remove_pending();
+                    return result;
+                } catch (...) {
+                    remove_pending();
+                    throw;
+                }
+            });
+        }
         auto response = server_.handle_message(message, &context);
         context.finish();
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {
@@ -1149,6 +1221,9 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         }
         return *stream;
     };
+    if (options_.response_mode == HttpResponseMode::sse_only) {
+        start_sse();
+    }
     const bool can_emit_sse = options_.response_mode != HttpResponseMode::json_only && accept_sse;
     ToolContext context(cancellation->get_token(), [&](Json event) {
         if (!can_emit_sse) {
@@ -1157,6 +1232,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         start_sse().write_event(event.dump());
     }, rpc_request.params, options_.notification_min_interval,
        options_.max_notifications_per_request);
+    if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
     auto response = server_.handle_message(message, &context);
     context.finish();
     if (rpc_request.method == "server/discover") {

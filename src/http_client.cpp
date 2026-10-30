@@ -63,7 +63,14 @@ struct Response {
     bool complete = false;
     bool header_field_open = false;
     std::size_t max_body = 0;
+    std::size_t body_bytes = 0;
+    bool streamed = false;
+    std::function<void(std::string_view)> on_chunk;
+    std::exception_ptr callback_error;
 };
+
+std::string lower(std::string_view value);
+std::optional<std::string> header_value(const transport::Headers& headers, std::string_view name);
 
 class HttpStatusError final : public std::runtime_error {
 public:
@@ -122,10 +129,22 @@ int on_header_value(llhttp_t* parser, const char* data, std::size_t length) {
 
 int on_body(llhttp_t* parser, const char* data, std::size_t length) {
     auto& response = response_state(parser);
-    if (length > response.max_body - std::min(response.max_body, response.body.size())) {
+    if (length > response.max_body - std::min(response.max_body, response.body_bytes)) {
         return HPE_USER;
     }
-    response.body.append(data, length);
+    response.body_bytes += length;
+    try {
+        if (response.status == 200 && response.on_chunk &&
+            lower(header_value(response.headers, "Content-Type").value_or("")).find("text/event-stream") != std::string::npos) {
+            response.streamed = true;
+            response.on_chunk(std::string_view(data, length));
+        } else {
+            response.body.append(data, length);
+        }
+    } catch (...) {
+        response.callback_error = std::current_exception();
+        return HPE_USER;
+    }
     return 0;
 }
 
@@ -576,7 +595,7 @@ struct HttpClientTransport::Impl {
     asio::ssl::context tls_context;
     std::unique_ptr<asio::ssl::stream<asio::ip::tcp::socket&>> tls_socket;
 #endif
-    std::mutex mutex;
+    std::recursive_mutex mutex;
     std::string session_id;
     bool modern = true;
     bool started = false;
@@ -672,7 +691,8 @@ struct HttpClientTransport::Impl {
     Response perform(std::string_view body, std::string_view method,
                      std::string_view name = {}, bool initialize = false,
                      bool notification = false, const Headers& mirrored = {},
-                     bool challenged = false) {
+                     bool challenged = false,
+                     const std::function<void(const core::Message&)>& on_stream = {}) {
         connect_socket();
         transport::Headers headers{
             {"Content-Type", "application/json"},
@@ -738,6 +758,20 @@ struct HttpClientTransport::Impl {
 
         Response response;
         response.max_body = options.max_response_bytes;
+        transport::SseParser sse_parser(options.max_response_bytes);
+        if (on_stream) {
+            response.on_chunk = [&](std::string_view chunk) {
+                for (const auto& event : sse_parser.feed(chunk)) {
+                    const auto parsed = core::parse_message(event.data);
+                    const auto* message = std::get_if<core::Message>(&parsed);
+                    if (message == nullptr) throw std::runtime_error("Invalid JSON-RPC SSE event");
+                    if (modern && std::holds_alternative<core::Request>(*message)) {
+                        throw std::runtime_error("Modern servers cannot initiate JSON-RPC requests");
+                    }
+                    on_stream(*message);
+                }
+            };
+        }
         auto settings = response_settings();
         llhttp_t parser;
         llhttp_init(&parser, HTTP_RESPONSE, &settings);
@@ -762,6 +796,10 @@ struct HttpClientTransport::Impl {
                 throw std::runtime_error("HTTP response timed out");
             }
             const auto parsed = llhttp_execute(&parser, buffer.data(), count);
+            if (response.callback_error) {
+                close_socket();
+                std::rethrow_exception(response.callback_error);
+            }
             if (parsed != HPE_OK && parsed != HPE_PAUSED) {
                 close_socket();
                 const auto* reason = llhttp_get_error_reason(&parser);
@@ -783,7 +821,7 @@ struct HttpClientTransport::Impl {
             if (!challenged && options.auth_provider &&
                 options.auth_provider->on_challenge(challenge) == AuthAction::retry) {
                 close_socket();
-                return perform(body, method, name, initialize, notification, mirrored, true);
+                return perform(body, method, name, initialize, notification, mirrored, true, on_stream);
             }
             if (response.status == 401) {
                 throw AuthRequired(challenge);
@@ -796,6 +834,7 @@ struct HttpClientTransport::Impl {
         if (notification && response.status != 202 && response.status != 200) {
             throw HttpStatusError(response.status);
         }
+        response.on_chunk = {};
         return response;
     }
 
@@ -1441,7 +1480,7 @@ HttpClientTransport::~HttpClientTransport() {
 }
 
 void HttpClientTransport::start() {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard lock(impl_->mutex);
     if (impl_->started) {
         return;
     }
@@ -1450,13 +1489,18 @@ void HttpClientTransport::start() {
 }
 
 void HttpClientTransport::send(const core::Message& message) {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard lock(impl_->mutex);
     if (!impl_->started || impl_->closed) {
         throw std::runtime_error("HTTP client transport is not connected");
     }
     const auto method = request_method(message);
     if (method.empty()) {
-        throw std::invalid_argument("HTTP client transport cannot send JSON-RPC responses");
+        if (impl_->modern) throw std::invalid_argument("Modern HTTP cannot send JSON-RPC responses");
+        Impl reply(impl_->options);
+        reply.modern = false;
+        reply.session_id = impl_->session_id;
+        (void)reply.perform(core::serialize_message(message), {}, {}, false, true);
+        return;
     }
     auto body_message = message;
     if (auto* request = std::get_if<core::Request>(&body_message)) {
@@ -1500,7 +1544,16 @@ void HttpClientTransport::send(const core::Message& message) {
     }
     const bool notification = std::holds_alternative<core::Notification>(body_message);
     const auto response = impl_->perform(core::serialize_message(body_message), method, name,
-                                         false, notification, mirrored);
+                                         false, notification, mirrored, false,
+        [&](const core::Message& streamed) {
+            if (method == "tools/list") {
+                if (const auto* result = std::get_if<core::ResultResponse>(&streamed)) {
+                    impl_->cache_tools(result->result);
+                }
+            }
+            if (on_message_) on_message_(streamed);
+        });
+    if (response.streamed) return;
     if (notification || response.body.empty()) {
         return;
     }
@@ -1544,7 +1597,7 @@ void HttpClientTransport::close() {
     if (!impl_) {
         return;
     }
-    std::lock_guard<std::mutex> lock(impl_->mutex);
+    std::lock_guard lock(impl_->mutex);
     if (impl_->closed) {
         return;
     }
@@ -1616,7 +1669,7 @@ std::shared_ptr<ListenHandle> HttpClientTransport::listen(
     bool modern = false;
     std::string session_id;
     {
-        std::lock_guard<std::mutex> lock(impl_->mutex);
+        std::lock_guard lock(impl_->mutex);
         if (!impl_->started || impl_->closed) {
             throw std::runtime_error("HTTP client transport is not connected");
         }
@@ -1653,7 +1706,9 @@ std::shared_ptr<ListenHandle> HttpClientTransport::listen(
 
 void Client::connect_http(HttpClientOptions options) {
     policy_ = options.policy;
-    connect(std::make_shared<transport::HttpClientTransport>(std::move(options)));
+    auto http = std::make_shared<transport::HttpClientTransport>(std::move(options));
+    connect(http);
+    legacy_transport_ = !http->is_modern();
 }
 
 std::string Client::http_mode() const {

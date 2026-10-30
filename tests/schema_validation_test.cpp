@@ -21,6 +21,8 @@ bool throws_invalid_argument(Fn&& fn) {
 
 void test_schema_register() {
     auto validator = cppmcp::core::make_json_schema_validator();
+    CPPMCP_CHECK(!validator->compile(true)->validate(nullptr));
+    CPPMCP_CHECK(validator->compile(false)->validate(nullptr).has_value());
     const nlohmann::json schema = {
         {"type", "object"},
         {"properties", {{"a", {{"type", "number"}}}, {"b", {{"type", "number"}}}}},
@@ -78,6 +80,39 @@ void test_schema_limits() {
     cppmcp::core::SchemaValidationLimits small_instance;
     small_instance.max_instance_depth = 1;
     CPPMCP_CHECK(string_schema->validate(nlohmann::json{{"nested", {"value"}}}).has_value());
+}
+
+void test_schema_regex() {
+    auto validator = cppmcp::core::make_json_schema_validator();
+    for (const auto* pattern : {"(a+)+$", "(a?){10000}$", "a{1000000000}", "\\p{Letter}", "(a)\\1"}) {
+        CPPMCP_CHECK(throws_invalid_argument([&] {
+            validator->compile({{"type", "string"}, {"pattern", pattern}});
+        }));
+    }
+    const auto simple = validator->compile({{"type", "string"}, {"pattern", "^[a-z]+$"}});
+    CPPMCP_CHECK(!simple->validate("valid"));
+    CPPMCP_CHECK(simple->validate(std::string(1025, 'a')).has_value());
+    const auto names = validator->compile({{"patternProperties", {{"x", true}}}});
+    CPPMCP_CHECK(names->validate({{std::string(1025, 'x'), 1}}).has_value());
+}
+
+void test_schema_references() {
+    auto validator = cppmcp::core::make_json_schema_validator();
+    CPPMCP_CHECK(throws_invalid_argument([&] {
+        validator->compile({{"$anchor", "self"}, {"$ref", "#self"}});
+    }));
+    CPPMCP_CHECK(throws_invalid_argument([&] {
+        validator->compile({{"$dynamicAnchor", "self"}, {"$dynamicRef", "#self"}});
+    }));
+    CPPMCP_CHECK(throws_invalid_argument([&] {
+        validator->compile({{"$dynamicRef", "https://example.test/schema"}});
+    }));
+    const auto encoded = validator->compile({{"$defs", {{"a b", {{"type", "integer"}}}}},
+                                              {"$ref", "#/$defs/a%20b"}});
+    CPPMCP_CHECK(!encoded->validate(1));
+    CPPMCP_CHECK(encoded->validate("bad").has_value());
+    const auto literal = validator->compile({{"const", {{"$ref", "https://example.test/data"}}}});
+    CPPMCP_CHECK(!literal->validate({{"$ref", "https://example.test/data"}}));
 }
 
 void test_output_schema() {

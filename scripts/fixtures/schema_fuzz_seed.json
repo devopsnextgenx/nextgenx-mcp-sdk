@@ -1,0 +1,1 @@
+{"schema":{"type":"object","properties":{"value":{"type":"string","pattern":"^[a-z]+$"}},"required":["value"],"additionalProperties":false},"instance":{"value":"sample"}}

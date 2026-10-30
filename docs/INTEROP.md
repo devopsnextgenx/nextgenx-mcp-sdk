@@ -1,5 +1,24 @@
 # HTTP interop evidence
 
+## Phase 4 Local Interop
+
+The Ubuntu 25.04 Docker environment verified the bundled modern/legacy clients
+against the dual-mode example: structured output, progress/log callbacks,
+accepted/declined/cancelled elicitation, bounded repeated input and shared-key
+continuation. The slice-3 gate reported 48 passed, zero failures and zero warnings.
+
+Focused tests additionally exercise actual server-initiated legacy RPCs over
+HTTP and stdio, not an MRTR result extension on a legacy wire. The HTTP test
+checks the generated server request ID and session response POST; the stdio test
+initializes a legacy connection and answers `elicitation/create`. Live-progress
+coverage requires the client callback before its server handler completes.
+External-client Phase 4 attempts, when run, are recorded in
+[4_EVIDENCE.md](4_EVIDENCE.md); earlier results below remain historical.
+The completed Phase 4 Inspector CLI 2.13.0 run exited 0 and returned parsed JSON
+with `structuredContent: 3` and text `"3.0"`. Its Node engine warning is recorded
+as an environment limitation. Claude CLI is not installed in the Docker image,
+so Phase 4 does not claim a fresh Claude connection check.
+
 ## Existing server interop baseline
 
 The Phase 3C environment reported successful real-client interop on

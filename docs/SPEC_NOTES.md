@@ -17,6 +17,31 @@ still current.
 - [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728), [RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414), [RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707), [RFC 9207](https://datatracker.ietf.org/doc/html/rfc9207), [RFC 7636](https://datatracker.ietf.org/doc/html/rfc7636), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1), [RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662), and [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)
 - [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
 
+## Phase 4 Clarifications
+
+The checked-in 2026 schema defines `InputRequests` as an ID-keyed object, not an
+array. An `input_required` result has at least one of `inputRequests` or
+`requestState`; state-only continuation is valid. Retry the original parameters,
+echo the exact state string, attach ID-keyed responses, and use a different RPC
+ID. The state codec excludes the two continuation fields from its parameter
+digest, not arbitrary metadata or arguments.
+
+Form mode defaults to `form` when omitted. Its requested schema is flat and only
+for non-sensitive values. The 2026 URL form contains `mode`, `message` and `url`,
+not the legacy `elicitationId`. The legacy adapter adds that ID when issuing an
+actual legacy URL request. Clients declare specific form/URL capabilities.
+
+Missing required capability is `-32021` with `data.requiredCapabilities`. HTTP
+uses status 400 before headers are committed; errors discovered after a forced
+or emitting SSE stream starts remain on that response stream. Progress tokens
+can be strings or integers. Logging is deprecated, not removed; current-era
+logs are forbidden without the request's log-level opt-in.
+
+The validator implements a bounded schema profile over jsoncons. Rejection of
+external references, cycles/duplicate anchors and unsupported regex syntax is
+an explicit security policy, not a claim that those schemas are invalid under
+unrestricted Draft 2020-12. See [SECURITY.md](SECURITY.md).
+
 ## Protocol requirements that shape the implementation
 
 ### Modern protocol: 2026-07-28 and later

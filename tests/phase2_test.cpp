@@ -53,9 +53,7 @@ void test_phase2_memory_roundtrip() {
 
         const auto call = client.call_tool("echo", {{"value", "hello"}});
         CPPMCP_CHECK(call.contains("structuredContent"));
-        // structuredContent must be an object, so scalar results are wrapped.
-        CPPMCP_CHECK(call["structuredContent"].is_object());
-        CPPMCP_CHECK(call["structuredContent"]["result"] == "hello");
+        CPPMCP_CHECK(call["structuredContent"] == "hello");
     } catch (const std::exception& e) {
         CPPMCP_LOG_ERROR("memory roundtrip threw: " << e.what());
         CPPMCP_CHECK(false);
@@ -83,8 +81,7 @@ void test_phase2_stdio_roundtrip() {
 
         const auto call = client.call_tool("echo", {{"value", "stdio"}});
         CPPMCP_CHECK(call.contains("structuredContent"));
-        CPPMCP_CHECK(call["structuredContent"].is_object());
-        CPPMCP_CHECK(call["structuredContent"]["result"] == "stdio");
+        CPPMCP_CHECK(call["structuredContent"] == "stdio");
     } catch (const std::exception& e) {
         CPPMCP_LOG_ERROR("stdio roundtrip threw: " << e.what());
         CPPMCP_CHECK(false);

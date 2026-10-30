@@ -1,4 +1,31 @@
-# Phase 3D conformance results
+# Conformance Results
+
+## Phase 4 Profile
+
+The official JSON Schema Test Suite's 46 Draft 2020-12 categories are pinned at
+commit `89e83a74014617ffbe79a56d83d14d054cd11417`. The schema-focused Docker run
+completed 52 CTest cases without failures. Entirely excluded categories were
+`defs`, `refRemote` and `vocabulary`; individual groups are also explicitly
+skipped for external references, cycles/duplicate anchors or the regex profile.
+The runner reports passed, failed and skipped instances for every file. This is
+not an unrestricted Draft 2020-12 conformance claim.
+The completed reports total **1167 passed, 0 failed, 135 policy-skipped** cases.
+The full Phase 4 gate discovers 150 CTest tests and reports 70 acceptance checks
+passed, zero failures and zero warnings.
+The complete sanitizer/interop gate reports 73 checks passed, zero failures and
+one warning for missing Claude CLI. ASan/UBSan and TSan pass with zero findings
+in the documented isolated Docker configuration.
+
+Phase 4 tests cover registration/limits, raw structured JSON, output rejection,
+token-aware progress, filtered/redacted logs, authenticated MRTR, state-only
+retries, expiry/key rotation, cross-subject/two-instance verification, live HTTP
+progress and actual legacy HTTP/stdio elicitation. Resources, prompts and
+completions are not claimed by this phase.
+
+The official MCP CLI results below remain historical Phase 3D observations,
+not a fresh Phase 4 run. Final Phase 4 evidence is in [4_EVIDENCE.md](4_EVIDENCE.md).
+
+## Historical Phase 3D
 
 ## Tool and protocol version
 

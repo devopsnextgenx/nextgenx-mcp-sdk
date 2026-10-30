@@ -367,6 +367,10 @@ const std::string& ToolContext::request_state() const noexcept {
     return request_state_;
 }
 
+void ToolContext::set_request_state(std::string state) {
+    request_state_ = std::move(state);
+}
+
 const nlohmann::json& ToolContext::state() const noexcept {
     return state_;
 }
@@ -386,6 +390,31 @@ void ToolContext::set_client_capabilities(nlohmann::json capabilities) {
 
 bool ToolContext::cancelled() const noexcept {
     return cancellation_.stop_requested();
+}
+
+void ToolContext::set_input_request_handler(
+    std::function<nlohmann::json(const nlohmann::json&)> handler) {
+    input_request_handler_ = std::move(handler);
+}
+
+nlohmann::json ToolContext::request_input(const nlohmann::json& request) const {
+    if (!input_request_handler_ || cancelled()) {
+        throw std::runtime_error("Input request unavailable or cancelled");
+    }
+    return input_request_handler_(request);
+}
+
+bool ToolContext::can_request_input() const noexcept {
+    return static_cast<bool>(input_request_handler_);
+}
+
+void ToolContext::set_request_subject(std::string subject) {
+    if (subject.empty()) throw std::invalid_argument("Request-state subject must not be empty");
+    request_subject_ = std::move(subject);
+}
+
+const std::string& ToolContext::request_subject() const noexcept {
+    return request_subject_;
 }
 
 std::stop_token ToolContext::cancellation_token() const noexcept {
@@ -631,18 +660,20 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             tool_context.set_client_capabilities(legacy_client_capabilities_);
         }
         core::RequestStateBinding binding;
+        const auto request_state_codec = request_state_codec_.load();
         binding.method = method;
         binding.name = name;
         binding.params = request.params;
-        binding.subject = subject_provider_ ? subject_provider_->subject(request) : "anonymous";
+        binding.subject = subject_provider_ ? subject_provider_->subject(request) : tool_context.request_subject();
         std::size_t round = 0;
         try {
+            tool_context.set_request_state(request.params.value("requestState", std::string{}));
             const auto responses = request.params.value("inputResponses", nlohmann::json::object());
             if (!responses.is_object()) {
                 throw std::invalid_argument("inputResponses must be an object");
             }
             if (request.params.contains("requestState")) {
-                const auto claims = request_state_codec_->verify(
+                const auto claims = request_state_codec->verify(
                     request.params.at("requestState").get<std::string>(), binding);
                 if (claims.round > max_mrtr_rounds_) {
                     throw std::invalid_argument("TooManyRounds: continuation limit reached");
@@ -729,11 +760,11 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             } else {
                 result = handler(arguments, request.params);
             }
-        } catch (const std::exception& error) {
-            CPPMCP_LOG_ERROR("tool '" << name << "' threw: " << error.what());
+        } catch (const std::exception&) {
+            CPPMCP_LOG_ERROR("tool '" << name << "' execution failed");
             nlohmann::json content = nlohmann::json::array();
             content.push_back({{"type", "text"},
-                               {"text", std::string("Tool execution failed: ") + error.what()}});
+                               {"text", "Tool execution failed"}});
             return finalize({{"content", std::move(content)}, {"isError", true}});
         }
 
@@ -815,7 +846,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
                     {"state", payload.value("privateState", tool_context.state())},
                     {"inputRequests", requests}};
                 payload.erase("privateState");
-                payload["requestState"] = request_state_codec_->issue(binding);
+                payload["requestState"] = request_state_codec->issue(binding);
                 return core::ResultResponse{request.id, std::move(payload)};
             } catch (const std::exception&) {
                 return core::ErrorResponse{request.id,
@@ -833,8 +864,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
                                                         {}, "structuredContent is missing"})
                                               : schemas.output->validate(*structured);
             if (validation_error) {
-                CPPMCP_LOG_ERROR("tool '" << name << "' returned output that violates its schema: "
-                                          << validation_error->message);
+                CPPMCP_LOG_ERROR("tool '" << name << "' returned output that violates its schema");
                 return core::ErrorResponse{
                     request.id,
                     core::protocol_error(core::ErrorCode::internal_error,
@@ -861,7 +891,41 @@ core::Message Server::handle_message(const core::Message& message, ToolContext* 
         [this, context](const auto& value) -> core::Message {
             using T = std::decay_t<decltype(value)>;
             if constexpr (std::is_same_v<T, core::Request>) {
-                return handle_request(value, context);
+                auto response = handle_request(value, context);
+                if (context == nullptr || !context->can_request_input() ||
+                    !request_protocol_version(value.params).empty()) {
+                    return response;
+                }
+                try {
+                    for (std::size_t round = 0; round <= max_mrtr_rounds_; ++round) {
+                        const auto* result = std::get_if<core::ResultResponse>(&response);
+                        if (result == nullptr ||
+                            result->result.value("resultType", std::string{}) != "input_required") {
+                            return response;
+                        }
+                        auto retry = value;
+                        retry.params["requestState"] = result->result.at("requestState");
+                        auto responses = nlohmann::json::object();
+                        const auto requests = result->result.value("inputRequests", nlohmann::json::object());
+                        for (auto input = requests.begin(); input != requests.end(); ++input) {
+                            auto legacy_input = input.value();
+                            if (legacy_input.value("method", std::string{}) == "elicitation/create" &&
+                                legacy_input["params"].value("mode", std::string("form")) == "url") {
+                                legacy_input["params"]["elicitationId"] = input.key();
+                            }
+                            responses[input.key()] = context->request_input(legacy_input);
+                        }
+                        retry.params["inputResponses"] = std::move(responses);
+                        response = handle_request(retry, context);
+                    }
+                    return core::ErrorResponse{value.id,
+                        core::protocol_error(core::ErrorCode::invalid_params,
+                                             "TooManyRounds: legacy input continuation limit reached")};
+                } catch (const std::exception&) {
+                    return core::ErrorResponse{value.id,
+                        core::protocol_error(core::ErrorCode::internal_error,
+                                             "Legacy input request failed or timed out")};
+                }
             } else if constexpr (std::is_same_v<T, core::Notification>) {
                 return handle_notification(value);
             } else {

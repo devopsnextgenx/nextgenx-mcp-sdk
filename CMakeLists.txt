@@ -76,6 +76,11 @@ set(CPPMCP_SOURCES
     src/connection.cpp
 )
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_FLAGS MATCHES "-fsanitize=address")
+    set_source_files_properties(src/json_schema.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-error=maybe-uninitialized")
+endif()
+
 set(CPPMCP_SERVER_SOURCES
     src/server.cpp
     src/subscription_registry.cpp
@@ -194,6 +199,13 @@ if(CPPMCP_BUILD_FUZZERS)
     target_compile_options(cppmcp_llhttp PRIVATE
         -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer
     )
+    foreach(fuzz_library IN ITEMS cppmcp_core cppmcp_server cppmcp_client
+            cppmcp_transport_stdio cppmcp_transport_http)
+        target_compile_options(${fuzz_library} PRIVATE
+            -fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
+        target_link_options(${fuzz_library} INTERFACE
+            "$<BUILD_INTERFACE:-fsanitize=address,undefined>")
+    endforeach()
 
     function(cppmcp_add_fuzzer target source)
         add_executable(${target} ${source})
@@ -222,6 +234,12 @@ if(CPPMCP_BUILD_FUZZERS)
 
     cppmcp_add_fuzzer(cppmcp_fuzz_www_authenticate fuzz/www_auth_fuzz.cpp)
     target_link_libraries(cppmcp_fuzz_www_authenticate PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_json_schema fuzz/json_schema_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_json_schema PRIVATE cppmcp::core)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_request_state fuzz/request_state_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_request_state PRIVATE cppmcp::core)
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -300,6 +318,30 @@ cppmcp_configure_warnings(cppmcp_http_client)
 
 if(CPPMCP_BUILD_TESTS)
     enable_testing()
+    FetchContent_Declare(
+        json_schema_suite
+        URL https://codeload.github.com/json-schema-org/JSON-Schema-Test-Suite/tar.gz/89e83a74014617ffbe79a56d83d14d054cd11417
+        URL_HASH SHA256=70e238f62ee2d5143e9b292109dbf054f5055d31111ae20f75af754807c5323a
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    )
+    FetchContent_MakeAvailable(json_schema_suite)
+    add_executable(cppmcp_json_schema_suite_tests tests/json_schema_suite_test.cpp)
+    target_compile_features(cppmcp_json_schema_suite_tests PRIVATE cxx_std_20)
+    cppmcp_configure_warnings(cppmcp_json_schema_suite_tests)
+    if(CPPMCP_BUILD_STATIC)
+        target_link_libraries(cppmcp_json_schema_suite_tests PRIVATE cppmcp::core)
+    else()
+        target_link_libraries(cppmcp_json_schema_suite_tests PRIVATE cppmcp::core_shared)
+    endif()
+    file(GLOB schema_suite_files CONFIGURE_DEPENDS
+        "${json_schema_suite_SOURCE_DIR}/tests/draft2020-12/*.json")
+    foreach(suite_file IN LISTS schema_suite_files)
+        get_filename_component(suite_name "${suite_file}" NAME_WE)
+        add_test(NAME cppmcp_json_schema_suite_${suite_name}
+            COMMAND cppmcp_json_schema_suite_tests "${suite_file}")
+        set_tests_properties(cppmcp_json_schema_suite_${suite_name}
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+    endforeach()
     add_executable(cppmcp_core_tests
         tests/test_main.cpp
         tests/json_rpc_test.cpp
@@ -334,8 +376,14 @@ if(CPPMCP_BUILD_TESTS)
     )
         foreach(test_name IN ITEMS
             json_rpc versions schema_contract schema_register schema_limits output_schema
+            schema_regex schema_references
             mrtr elicit request_state two_instance
             mrtr_client elicit_url mrtr_generic
+            legacy_adapter
+            http_progress_live
+            http_legacy_elicit
+            stdio_legacy_elicit
+            request_state_subject
             progress logging
             phase2_memory phase2_stdio
             http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types

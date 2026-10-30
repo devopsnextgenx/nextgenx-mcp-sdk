@@ -9,8 +9,12 @@ Client::Client(ClientInfo info, NegotiationPolicy policy)
     : info_(std::move(info)), policy_(policy) {}
 
 void Client::connect(std::shared_ptr<cppmcp::core::ITransport> transport) {
+    legacy_transport_ = false;
     transport_ = std::move(transport);
     connection_ = std::make_shared<cppmcp::core::Connection>(transport_);
+    connection_->set_request_handler([this](const core::Request& request) {
+        handle_server_request(request);
+    });
     connection_->set_notification_handler(
         [this](const core::Notification& notification) {
             handle_server_notification(notification);
@@ -46,7 +50,7 @@ void Client::handle_server_notification(const core::Notification& notification) 
             std::lock_guard<std::mutex> lock(tool_callbacks_mutex_);
             const auto active = active_tool_calls_.find(token->get<std::string>());
             if (active != active_tool_calls_.end()) {
-                callback = active->second.on_progress;
+                callback = active->second.options.on_progress;
             }
         }
         if (callback) {
@@ -75,8 +79,8 @@ void Client::handle_server_notification(const core::Notification& notification) 
         {
             std::lock_guard<std::mutex> lock(tool_callbacks_mutex_);
             for (const auto& [_, active] : active_tool_calls_) {
-                if (!active.log_level.empty() && active.on_log) {
-                    callbacks.push_back(active.on_log);
+                if (!active.options.log_level.empty() && active.options.on_log) {
+                    callbacks.push_back(active.options.on_log);
                 }
             }
         }
@@ -84,6 +88,42 @@ void Client::handle_server_notification(const core::Notification& notification) 
             callback(level, logger, data);
         }
     }
+}
+
+void Client::handle_server_request(const core::Request& request) {
+    nlohmann::json result;
+    try {
+        CallToolOptions options;
+        {
+            std::lock_guard<std::mutex> lock(tool_callbacks_mutex_);
+            if (active_tool_calls_.size() != 1) throw std::runtime_error("Ambiguous legacy input request");
+            auto& active = active_tool_calls_.begin()->second;
+            if (++active.input_requests > active.options.max_rounds) {
+                throw std::runtime_error("TooManyRounds: legacy input request limit reached");
+            }
+            options = active.options;
+        }
+        const auto id = std::visit([](const auto& value) -> std::string {
+            if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::string>) return value;
+            else return std::to_string(value);
+        }, request.id);
+        const nlohmann::json input{{"method", request.method}, {"params", request.params}};
+        if (options.on_input) {
+            result = options.on_input(id, input);
+        } else if (request.method == "elicitation/create" && options.on_elicit) {
+            const auto mode = request.params.value("mode", std::string("form"));
+            if (mode == "form") core::validate_elicitation_form_schema(request.params.at("requestedSchema"));
+            else if (mode != "url" || !options.allow_url_elicitation) throw std::runtime_error("Unsupported elicitation mode");
+            result = options.on_elicit(id, input);
+        } else {
+            throw std::runtime_error("No handler for legacy input request");
+        }
+    } catch (...) {
+        transport_->send(core::ErrorResponse{request.id,
+            core::protocol_error(core::ErrorCode::invalid_params, "Input request rejected")});
+        throw;
+    }
+    transport_->send(core::ResultResponse{request.id, std::move(result)});
 }
 
 nlohmann::json Client::discover() {
@@ -113,6 +153,10 @@ nlohmann::json Client::call_tool(const std::string& name, const nlohmann::json& 
     }
     const auto call_id = "call-" + std::to_string(
         next_progress_token_.fetch_add(1, std::memory_order_relaxed));
+    std::unique_lock<std::mutex> logging_guard(logging_tool_call_mutex_, std::defer_lock);
+    if (!options.log_level.empty()) logging_guard.lock();
+    std::unique_lock<std::mutex> legacy_guard(legacy_tool_call_mutex_, std::defer_lock);
+    if (legacy_transport_) legacy_guard.lock();
     if (!options.client_capabilities.is_object() || options.timeout.count() <= 0) {
         throw std::invalid_argument("Tool call requires object capabilities and a positive timeout");
     }
@@ -137,7 +181,7 @@ nlohmann::json Client::call_tool(const std::string& name, const nlohmann::json& 
     }
     {
         std::lock_guard<std::mutex> lock(tool_callbacks_mutex_);
-        active_tool_calls_.emplace(call_id, options);
+        active_tool_calls_.emplace(call_id, ActiveToolCall{options, 0});
     }
     try {
         nlohmann::json request_params = {

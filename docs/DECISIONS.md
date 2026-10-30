@@ -22,6 +22,31 @@
   a text content block by default for compatibility.
 - `--validate-output` defaults to `on`; applications can disable server-side
   output validation explicitly. Input validation is always enabled.
+- Pin the official JSON Schema Test Suite at commit
+  `89e83a74014617ffbe79a56d83d14d054cd11417`, archive SHA-256
+  `70e238f62ee2d5143e9b292109dbf054f5055d31111ae20f75af754807c5323a`.
+  Each Draft 2020-12 category is a CTest case. Report policy exclusions as skips,
+  not passes or generic backend failures. Unicode regex properties are outside
+  the bounded standard-regex profile.
+- `IRequestStateCodec` separates continuation state from transport. The default
+  HMAC codec binds the original operation/principal, has a ten-minute TTL and
+  supports key rotation. Claims are signed, not encrypted or single-use.
+- Reuse handlers for modern MRTR and true legacy server-initiated requests.
+  HTTP correlates response POSTs by session/request ID; stdio keeps its reader
+  free with worker dispatch. Modern HTTP rejects incoming server RPC requests.
+- Parse HTTP SSE incrementally so callbacks execute while an operation runs.
+  Serialize logging-enabled and legacy calls where the wire cannot correlate
+  multiple application callbacks unambiguously.
+- OpenSSL 3 Crypto is a required core dependency for request-state authentication;
+  TLS remains a separate build option. Installed CMake consumers resolve Crypto
+  explicitly even when HTTP TLS is disabled.
+- GCC 14.2's optimized ASan build diagnoses libstdc++ regex internals with
+  `-Wmaybe-uninitialized`. Only `src/json_schema.cpp` in GCC ASan builds downgrades
+  that diagnostic from an error; instrumentation stays enabled. Normal builds
+  and TSan keep the existing strict warning policy.
+- Docker's default seccomp profile blocks TSan's process-local ASLR setup in this
+  environment. Sanitizer verification uses a disposable, unexposed test container
+  with `--security-opt seccomp=unconfined`, not a host security-setting change.
 
 ## Phase 1
 

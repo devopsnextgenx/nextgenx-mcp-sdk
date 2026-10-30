@@ -1,5 +1,70 @@
 # Streamable HTTP quickstart
 
+## Phase 4 Calls
+
+Build/test in the mounted Ubuntu container as described in [README.md](../README.md).
+The HTTP and stdio examples register the same schema/progress/input tools.
+Output validation defaults to on:
+
+```sh
+./build/cppmcp_http_server --port 8000 --mode dual --validate-output on
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp --mode modern \
+  --call structured_demo --args '{"city":"Paris"}'
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp --mode modern \
+  --call progress_demo --args '{"steps":3,"delay_ms":100}' --progress
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp --mode modern \
+  --call log_demo --args '{}' --log-level warning
+```
+
+`RESULT` includes structured JSON and, by default, the same JSON in a text block.
+`PROGRESS` arrives before completion; `LOG` respects the requested threshold.
+Wrong argument types return `isError: true`, unknown tools return `-32602`, and
+`bad_output` returns `-32603` rather than its invalid value.
+
+### Elicitation
+
+```sh
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp --mode modern \
+  --call delete_project --args '{"project":"alpha"}' \
+  --elicit accept --elicit-content '{"confirm":true}'
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp --mode legacy \
+  --call delete_project --args '{"project":"alpha"}' --elicit decline
+```
+
+The modern client handles `input_required`, fulfills ID-keyed input requests and
+echoes `requestState` with the original arguments/metadata and a new RPC ID. The
+legacy client answers a server-initiated request on the call's SSE stream. Accept
+plus `confirm: true` completes deletion; decline/cancel does not. `loop_input`
+exercises the round limit.
+
+[mrtr_accept_response.json](../scripts/fixtures/mrtr_accept_response.json) uses
+`__KEY__` for the server-assigned input ID. Do not guess IDs or manufacture a
+state token. State is authenticated but readable and must not contain secrets.
+For local cross-instance testing pass identical `--request-state-key` values;
+use protected `ServerOptions::request_state_keys` in applications.
+
+For C++ clients, set `CallToolOptions::on_elicit`, `max_rounds` and `timeout`.
+Form support is advertised only with a handler. URL handling additionally needs
+`allow_url_elicitation = true`; the callback must validate/present the destination.
+Generic `on_input` callbacks use explicit `client_capabilities` for roots or
+sampling. Legacy HTTP capabilities must also be declared in
+`HttpClientOptions::client_capabilities` before `connect_http` initializes the
+session. The CLI does this for `--elicit`.
+
+Server handlers use `ToolContext::input_responses()`, `state()` and
+`ToolResult::input_required(requests, private_state)`; the dispatcher authenticates
+and validates continuations before invoking them. `ToolResult::structured` and
+`error_text` distinguish output from execution errors. `report_progress` is
+token-aware; notification limits/intervals are in `HttpHandlerOptions`. Legacy
+input waits use `input_request_timeout` (30 seconds by default); configure client
+and server deadlines for the application's user-interaction workflow.
+
+Read [SECURITY.md](SECURITY.md) before deploying multi-user continuations. Bind
+state to an authenticated subject and enforce idempotency or one-time nonces
+for destructive operations.
+
+## Transport Basics
+
 This guide uses the same endpoint and request headers as
 [`scripts/verify_3b.sh`](../scripts/verify_3b.sh). It assumes the project has
 been built with CMake and `curl`, `jq`, and Python 3 are installed.

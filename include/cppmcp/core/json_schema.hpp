@@ -16,7 +16,7 @@ struct SchemaValidationLimits {
     std::size_t max_instance_bytes = 4 * 1024 * 1024;
     std::size_t max_instance_depth = 64;
     std::size_t max_pattern_bytes = 512;
-    std::size_t max_pattern_input_bytes = 64 * 1024;
+    std::size_t max_pattern_input_bytes = 1024;
 };
 
 struct SchemaValidationError {

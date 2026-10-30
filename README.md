@@ -10,9 +10,10 @@ HTTP server.
 - CMake 3.24 or newer
 - GCC 12+, Clang 15+, or MSVC 2022
 - C++20-capable standard library
+- OpenSSL 3 development headers and Crypto library (required even with TLS disabled)
 - Network access on the first configure to fetch the pinned nlohmann/json,
-    jsoncons, Asio, and llhttp dependencies (or an existing CMake FetchContent
-    cache for offline builds)
+    jsoncons, Asio, and llhttp dependencies, plus the official JSON Schema test
+    suite when tests are enabled (or an existing FetchContent cache for offline builds)
 
 ## Build, test, and package
 
@@ -53,20 +54,24 @@ docker.exe run --rm `
     --mount "type=bind,source=$($PWD.Path),target=/workspace" `
     --mount "type=volume,source=cppmcp-phase4-build,target=/workspace/build" `
     --workdir /workspace cppmcp-dev:ubuntu25.04 bash -lc `
-    "cmake -S . -B build && cmake --build build --parallel && ctest --test-dir build --output-on-failure"
+    'cmake -S . -B build; if [ $? -ne 0 ]; then exit 1; fi; cmake --build build --parallel 4; if [ $? -ne 0 ]; then exit 1; fi; ctest --test-dir build --output-on-failure'
 ```
 
 To run the Phase 4 gate in the same container, normalize the checked-in shell
-script's CRLF line endings in the command stream and preserve its script path
-for root discovery:
+script's CRLF line endings in the command stream. Run from the scripts directory
+so root discovery also works when reading from standard input:
 
 ```powershell
-docker.exe run --rm `
+docker.exe run --rm --cpuset-cpus=0-3 `
     --mount "type=bind,source=$($PWD.Path),target=/workspace" `
     --mount "type=volume,source=cppmcp-phase4-build,target=/workspace/build" `
-    --env TMPDIR=/workspace/build --workdir /workspace cppmcp-dev:ubuntu25.04 bash -lc `
-    "sed 's/\r$//' scripts/verify_4.sh | timeout 600 bash -c 'source /dev/stdin' scripts/verify_4.sh --slice 1"
+    --env TMPDIR=/workspace/build --workdir /workspace/scripts cppmcp-dev:ubuntu25.04 bash -lc `
+    'sed -e s/\\r$// verify_4.sh | timeout 600 bash -s -- --slice 4'
 ```
+
+The gate CPU range assumes four Docker CPUs; adjust it to the engine's assigned
+CPUs. Ubuntu 25.04 is retained as the requested test environment, but is out of
+security support and is not recommended as a production base image.
 
 Installed consumers use `find_package(cppmcp CONFIG REQUIRED)` and link
 `cppmcp::core` (static) or `cppmcp::core_shared` (shared).
@@ -111,11 +116,14 @@ logging, and elicitation examples:
 ```
 
 The in-process `McpHttpHandler` remains available for applications that supply
-their own HTTP exchange adapter. TLS, `subscriptions/listen`, legacy HTTP
-sessions, and an HTTP client remain unimplemented.
+their own exchange adapter. TLS, `subscriptions/listen`, legacy HTTP sessions,
+and the bundled HTTP client are implemented. Phase 4 adds compiled tool schemas,
+structured output, progress/log callbacks and authenticated multi-round input.
 
 See [QUICKSTART_HTTP.md](docs/QUICKSTART_HTTP.md) for curl examples, bearer
 authentication, mirrored parameter headers, and client-tool instructions.
+See [SECURITY.md](docs/SECURITY.md) for schema limits, form-versus-URL input,
+request-state key rotation, authenticated subject binding and replay limitations.
 
 Tools that need request-scoped streaming or disconnect cancellation can use the
 context-handler overload of `Server::add_tool` and call `ToolContext::emit`:

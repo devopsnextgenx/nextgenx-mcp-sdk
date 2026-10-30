@@ -144,7 +144,7 @@ void test_http_handler() {
     auto call = std::make_shared<MockExchange>(std::move(call_request));
     handler.handle(call);
     CPPMCP_CHECK(call->status == 200);
-    CPPMCP_CHECK(response_json(*call)["result"]["structuredContent"]["result"] == "echo");
+    CPPMCP_CHECK(response_json(*call)["result"]["structuredContent"] == "echo");
 
     auto encoded_name_request =
         make_request("tools/call", {{"name", non_ascii_name}, {"arguments", Json::object()}});
@@ -152,7 +152,7 @@ void test_http_handler() {
     auto encoded_name = std::make_shared<MockExchange>(std::move(encoded_name_request));
     handler.handle(encoded_name);
     CPPMCP_CHECK(encoded_name->status == 200);
-    CPPMCP_CHECK(response_json(*encoded_name)["result"]["structuredContent"]["result"] == "encoded");
+    CPPMCP_CHECK(response_json(*encoded_name)["result"]["structuredContent"] == "encoded");
 
     auto wrong_case_request = make_request("tools/list");
     for (auto& [name, _] : wrong_case_request.headers) {
@@ -322,8 +322,8 @@ void test_http_handler() {
     auto round_robin_b = std::make_shared<MockExchange>(std::move(round_robin_request_b));
     handler_a.handle(round_robin_a);
     handler_b.handle(round_robin_b);
-    CPPMCP_CHECK(response_json(*round_robin_a)["result"]["structuredContent"]["result"] == "A");
-    CPPMCP_CHECK(response_json(*round_robin_b)["result"]["structuredContent"]["result"] == "B");
+    CPPMCP_CHECK(response_json(*round_robin_a)["result"]["structuredContent"] == "A");
+    CPPMCP_CHECK(response_json(*round_robin_b)["result"]["structuredContent"] == "B");
 }
 
 void test_http_handler_header_params_stateless() {

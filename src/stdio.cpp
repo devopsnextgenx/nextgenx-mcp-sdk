@@ -143,11 +143,10 @@ void StdioServerTransport::handle_line(std::string line) {
         }
         return;
     }
-    CPPMCP_LOG_DEBUG("recv frame (" << line.size() << " bytes): " << line);
+    CPPMCP_LOG_DEBUG("recv frame (" << line.size() << " bytes)");
     const auto parsed = cppmcp::core::parse_message(line);
     if (const auto* error = std::get_if<cppmcp::core::RpcError>(&parsed)) {
-        CPPMCP_LOG_WARN("rejecting frame: code=" << error->code << " message=\"" << error->message
-                        << "\" frame: " << line);
+        CPPMCP_LOG_WARN("rejecting frame: code=" << error->code);
         if (on_parse_error_) {
             on_parse_error_(*error);
         }
@@ -210,7 +209,7 @@ void StdioServerTransport::read_loop() {
 
 void StdioServerTransport::send(const cppmcp::core::Message& message) {
     std::string frame = cppmcp::core::serialize_message(message);
-    CPPMCP_LOG_DEBUG("send frame (" << frame.size() << " bytes): " << frame);
+    CPPMCP_LOG_DEBUG("send frame (" << frame.size() << " bytes)");
     frame.push_back('\n');
     std::lock_guard<std::mutex> lock(output_mutex_);
 #ifndef _WIN32
@@ -378,11 +377,10 @@ void StdioClientTransport::read_loop() {
             const char ch = buffer[i];
             if (ch == '\n' || ch == '\r') {
                 if (!current.empty()) {
-                    CPPMCP_LOG_DEBUG("recv frame (" << current.size() << " bytes): " << current);
+                    CPPMCP_LOG_DEBUG("recv frame (" << current.size() << " bytes)");
                     auto parsed = cppmcp::core::parse_message(current);
                     if (const auto* error = std::get_if<cppmcp::core::RpcError>(&parsed)) {
-                        CPPMCP_LOG_WARN("rejecting frame from child: code=" << error->code
-                                        << " message=\"" << error->message << "\" frame: " << current);
+                        CPPMCP_LOG_WARN("rejecting frame from child: code=" << error->code);
                         if (on_parse_error_) {
                             on_parse_error_(*error);
                         }
@@ -409,7 +407,7 @@ void StdioClientTransport::send(const cppmcp::core::Message& message) {
         return;
     }
     std::string frame = cppmcp::core::serialize_message(message);
-    CPPMCP_LOG_DEBUG("send frame (" << frame.size() << " bytes): " << frame);
+    CPPMCP_LOG_DEBUG("send frame (" << frame.size() << " bytes)");
     frame.push_back('\n');
     std::lock_guard<std::mutex> lock(output_mutex_);
     if (!write_all(stdin_fd_, frame.data(), frame.size())) {

@@ -116,10 +116,16 @@ public:
     [[nodiscard]] const nlohmann::json& input_responses() const noexcept;
     void set_input_responses(nlohmann::json responses);
     [[nodiscard]] const std::string& request_state() const noexcept;
+    void set_request_state(std::string state);
     [[nodiscard]] const nlohmann::json& state() const noexcept;
     void set_state(nlohmann::json state);
     [[nodiscard]] const nlohmann::json& client_capabilities() const noexcept;
     void set_client_capabilities(nlohmann::json capabilities);
+    void set_input_request_handler(std::function<nlohmann::json(const nlohmann::json&)> handler);
+    nlohmann::json request_input(const nlohmann::json& request) const;
+    bool can_request_input() const noexcept;
+    void set_request_subject(std::string subject);
+    const std::string& request_subject() const noexcept;
     bool cancelled() const noexcept;
     std::stop_token cancellation_token() const noexcept;
 
@@ -139,6 +145,8 @@ private:
     nlohmann::json state_ = nlohmann::json::object();
     std::string request_state_;
     nlohmann::json client_capabilities_ = nlohmann::json::object();
+    std::function<nlohmann::json(const nlohmann::json&)> input_request_handler_;
+    std::string request_subject_ = "anonymous";
 };
 
 using ContextToolHandler =
@@ -231,7 +239,7 @@ private:
     core::SchemaValidationLimits schema_limits_;
     std::atomic_bool validate_output_{true};
     std::optional<std::string> legacy_log_level_;
-    std::shared_ptr<const core::IRequestStateCodec> request_state_codec_;
+    std::atomic<std::shared_ptr<const core::IRequestStateCodec>> request_state_codec_;
     std::shared_ptr<const IRequestStateSubjectProvider> subject_provider_;
     std::size_t max_mrtr_rounds_ = 10;
     nlohmann::json legacy_client_capabilities_ = nlohmann::json::object();
