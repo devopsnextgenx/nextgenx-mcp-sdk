@@ -5,6 +5,7 @@
 #include "cppmcp/core/log.hpp"
 #include "cppmcp/server.hpp"
 #include "cppmcp/transport/stdio.hpp"
+#include "phase4_tools.hpp"
 
 namespace {
 
@@ -34,7 +35,10 @@ int main() {
         .name = "echo",
         .title = "Echo",
         .description = "Echo a value back to the client.",
-        .input_schema = nlohmann::json::object({{"type", "object"}}),
+        .input_schema = {{"type", "object"},
+                 {"properties", {{"value", {{"type", "string"}}}}},
+                 {"required", {"value"}},
+                 {"additionalProperties", false}},
         .output_schema = nlohmann::json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = nlohmann::json::object(),
@@ -46,7 +50,11 @@ int main() {
         .name = "add",
         .title = "Add",
         .description = "Add two numbers.",
-        .input_schema = nlohmann::json::object({{"type", "object"}}),
+        .input_schema = {{"type", "object"},
+                 {"properties", {{"a", {{"type", "number"}}},
+                         {"b", {{"type", "number"}}}}},
+                 {"required", {"a", "b"}},
+                 {"additionalProperties", false}},
         .output_schema = nlohmann::json::object(),
         .annotations = cppmcp::ToolAnnotation{},
         .meta = nlohmann::json::object(),
@@ -56,6 +64,7 @@ int main() {
             return a + b;
         },
     });
+    cppmcp::examples::add_phase4_tools(server);
 
     auto transport = std::make_shared<cppmcp::transport::StdioServerTransport>();
     transport->on_message([&](const cppmcp::core::Message& message) {

@@ -64,6 +64,19 @@ sockets were released. Server shutdown now signals the native descriptors,
 waits for connection workers to release their sockets, and drains the context
 before destruction. The focused test and the full sanitizer suites then passed.
 
+## subscriptions/listen closure semantics
+
+The 2026-07-28 Subscriptions page says: “When the server ends a subscription
+on its own initiative (for example, during shutdown), it SHOULD respond to the
+original `subscriptions/listen` request with a completion result before
+closing the stream.” The successful completion response is permitted and
+signals graceful closure; abrupt transport loss has no response.
+
+The Phase 3D gate's “never a response” assertion only examines the four-second
+capture window. It does not prove that no completion response can be sent after
+that window. The implementation and evidence follow the current specification's
+graceful-closure rule.
+
 ## Fuzz smoke tests
 
 Five Clang/libFuzzer targets were built and each completed a bounded 10-run

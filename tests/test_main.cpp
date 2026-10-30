@@ -9,6 +9,9 @@
 void test_json_rpc();
 void test_versions();
 void test_schema_contract();
+void test_schema_register();
+void test_schema_limits();
+void test_output_schema();
 void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
 void test_http_handler();
@@ -132,6 +135,9 @@ int main(int argc, char** argv) {
     run_selected("json_rpc", test_json_rpc);
     run_selected("versions", test_versions);
     run_selected("schema_contract", test_schema_contract);
+    run_selected("schema_register", test_schema_register);
+    run_selected("schema_limits", test_schema_limits);
+    run_selected("output_schema", test_output_schema);
     run_selected("phase2_memory", test_phase2_memory_roundtrip);
     run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
     run_selected("http_handler", test_http_handler);

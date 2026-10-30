@@ -11,8 +11,8 @@ HTTP server.
 - GCC 12+, Clang 15+, or MSVC 2022
 - C++20-capable standard library
 - Network access on the first configure to fetch the pinned nlohmann/json,
-  Asio, and llhttp dependencies (or an existing CMake FetchContent cache for
-  offline builds)
+    jsoncons, Asio, and llhttp dependencies (or an existing CMake FetchContent
+    cache for offline builds)
 
 ## Build, test, and package
 
@@ -39,6 +39,33 @@ cmake -S . -B build -DCPPMCP_BUILD_SHARED=ON -DCPPMCP_BUILD_STATIC=ON
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
 cmake --install build --prefix install
+```
+
+### Ubuntu 25.04 Docker build
+
+The development image keeps the source checkout mounted and stores build
+artifacts in a persistent Docker volume. From PowerShell:
+
+```powershell
+docker.exe build --tag cppmcp-dev:ubuntu25.04 ./docker
+docker.exe volume create cppmcp-phase4-build
+docker.exe run --rm `
+    --mount "type=bind,source=$($PWD.Path),target=/workspace" `
+    --mount "type=volume,source=cppmcp-phase4-build,target=/workspace/build" `
+    --workdir /workspace cppmcp-dev:ubuntu25.04 bash -lc `
+    "cmake -S . -B build && cmake --build build --parallel && ctest --test-dir build --output-on-failure"
+```
+
+To run the Phase 4 gate in the same container, normalize the checked-in shell
+script's CRLF line endings in the command stream and preserve its script path
+for root discovery:
+
+```powershell
+docker.exe run --rm `
+    --mount "type=bind,source=$($PWD.Path),target=/workspace" `
+    --mount "type=volume,source=cppmcp-phase4-build,target=/workspace/build" `
+    --env TMPDIR=/workspace/build --workdir /workspace cppmcp-dev:ubuntu25.04 bash -lc `
+    "sed 's/\r$//' scripts/verify_4.sh | timeout 600 bash -c 'source /dev/stdin' scripts/verify_4.sh --slice 1"
 ```
 
 Installed consumers use `find_package(cppmcp CONFIG REQUIRED)` and link
@@ -75,8 +102,9 @@ options.port = 8080;
 auto running = server.start_http(options);
 ```
 
-The `http_server` example exposes `echo`, `add`, `slow_count`, `emit_demo`, and
-`weather_like` tools:
+The `http_server` example exposes the original `echo`, `add`, `slow_count`,
+`emit_demo`, and `weather_like` tools, plus the Phase 4 schema, progress,
+logging, and elicitation examples:
 
 ```sh
 ./build/cppmcp_http_server --port 8000

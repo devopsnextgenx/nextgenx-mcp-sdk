@@ -39,6 +39,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+set(JSONCONS_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    jsoncons
+    URL https://github.com/danielaparker/jsoncons/archive/refs/tags/v1.10.0.tar.gz
+    URL_HASH SHA256=c829350a2eece662beb378143e2ab1c1cbb07d703687bf168626665a8a7d8bc1
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(jsoncons)
+
 FetchContent_Declare(
     asio
     URL https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz
@@ -58,6 +67,7 @@ FetchContent_MakeAvailable(llhttp)
 
 set(CPPMCP_SOURCES
     src/json_rpc.cpp
+    src/json_schema.cpp
     src/version.cpp
     src/connection.cpp
 )
@@ -97,6 +107,8 @@ function(cppmcp_configure_library target)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${nlohmann_json_SOURCE_DIR}/include>
             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        PRIVATE
+            ${jsoncons_SOURCE_DIR}/include
     )
     if(CPPMCP_ENABLE_LEGACY)
         target_compile_definitions(${target} PUBLIC CPPMCP_ENABLE_LEGACY=1)
@@ -285,6 +297,7 @@ if(CPPMCP_BUILD_TESTS)
     add_executable(cppmcp_core_tests
         tests/test_main.cpp
         tests/json_rpc_test.cpp
+        tests/schema_validation_test.cpp
         tests/version_test.cpp
         tests/schema_contract_test.cpp
         tests/phase2_test.cpp
@@ -312,8 +325,9 @@ if(CPPMCP_BUILD_TESTS)
     target_compile_definitions(cppmcp_core_tests PRIVATE
         CPPMCP_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schema/2026-07-28/schema.json"
     )
-    foreach(test_name IN ITEMS
-            json_rpc versions schema_contract phase2_memory phase2_stdio
+        foreach(test_name IN ITEMS
+            json_rpc versions schema_contract schema_register schema_limits output_schema
+            phase2_memory phase2_stdio
             http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types
             cancellation
             http_server_methods http_server_host_origin

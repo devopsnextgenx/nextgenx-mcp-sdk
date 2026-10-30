@@ -1,6 +1,7 @@
 #pragma once
 
 #include <functional>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -11,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "cppmcp/core/json_rpc.hpp"
+#include "cppmcp/core/json_schema.hpp"
 #include "cppmcp/core/meta.hpp"
 #include "cppmcp/core/version.hpp"
 #include "cppmcp/transport/http_server.hpp"
@@ -96,24 +98,44 @@ struct ToolResult {
     bool is_error = false;
 
     static ToolResult text(std::string text) {
-        return ToolResult{nlohmann::json{{"type", "text"}, {"text", std::move(text)}}, false};
+        return ToolResult{nlohmann::json{{"content", nlohmann::json::array(
+                                                      {{{"type", "text"},
+                                                        {"text", std::move(text)}}})}},
+                          false};
     }
-    static ToolResult structured(nlohmann::json value) {
-        return ToolResult{std::move(value), false};
+    static ToolResult structured(nlohmann::json value, bool also_text = true) {
+        auto payload = nlohmann::json::object();
+        if (also_text) {
+            payload["content"] = nlohmann::json::array(
+                {{{"type", "text"}, {"text", value.dump()}}});
+        } else {
+            payload["content"] = nlohmann::json::array();
+        }
+        payload["structuredContent"] = std::move(value);
+        return ToolResult{std::move(payload), false};
     }
     static ToolResult error_text(std::string error) {
-        return ToolResult{nlohmann::json{{"type", "text"}, {"text", std::move(error)}}, true};
+        return ToolResult{nlohmann::json{{"content", nlohmann::json::array(
+                                                      {{{"type", "text"},
+                                                        {"text", std::move(error)}}})}},
+                          true};
     }
+    nlohmann::json to_json() const {
+        return {{"__cppmcp_tool_result", true}, {"payload", payload}, {"isError", is_error}};
+    }
+    operator nlohmann::json() const { return to_json(); }
 };
 
 class Server {
 public:
-    explicit Server(ServerInfo info = {"cppmcp", "cppmcp", "0.1.0"});
+    explicit Server(ServerInfo info = {"cppmcp", "cppmcp", "0.1.0"},
+                    core::SchemaValidationLimits schema_limits = {});
 
     void add_tool(ToolDefinition tool);
     void add_tool(ToolDefinition tool, ContextToolHandler context_handler);
     void add_tool(ToolBuilder tool);
     void add_tool(ToolBuilder tool, ContextToolHandler context_handler);
+    void set_validate_output(bool enabled) noexcept;
     bool has_tool(const std::string& name) const;
     std::vector<ToolDefinition> tools() const;
     std::vector<HeaderParamDefinition> tool_header_params(const std::string& name) const;
@@ -132,6 +154,12 @@ public:
     std::unique_ptr<transport::HttpServerHandle> start_http(const transport::HttpOptions& options);
 
 private:
+    struct CompiledToolSchemas {
+        std::shared_ptr<const core::ICompiledSchema> input;
+        std::shared_ptr<const core::ICompiledSchema> output;
+    };
+
+    CompiledToolSchemas compile_tool_schemas(const ToolDefinition& tool) const;
     std::string request_protocol_version(const core::Json& params) const;
     std::string request_method_name(const core::Request& request) const;
 
@@ -140,6 +168,10 @@ private:
     std::map<std::string, ToolDefinition> tools_;
     std::map<std::string, ContextToolHandler> context_handlers_;
     std::map<std::string, std::vector<HeaderParamDefinition>> header_params_;
+    std::map<std::string, CompiledToolSchemas> compiled_tool_schemas_;
+    std::shared_ptr<core::ISchemaValidator> schema_validator_;
+    core::SchemaValidationLimits schema_limits_;
+    std::atomic_bool validate_output_{true};
     std::shared_ptr<transport::SubscriptionRegistry> subscriptions_;
 
     friend class transport::McpHttpHandler;

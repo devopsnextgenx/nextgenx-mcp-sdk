@@ -1,6 +1,7 @@
 #include "cppmcp/server.hpp"
 #include "cppmcp/transport/http.hpp"
 #include "cppmcp/transport/http_server.hpp"
+#include "../phase4_tools.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -163,6 +164,27 @@ std::chrono::milliseconds parse_ping_interval_ms(const std::string& value) {
     return std::chrono::milliseconds(static_cast<int>(parsed));
 }
 
+std::string parse_request_state_key(const std::string& value) {
+    if (value.size() != 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') ||
+                   (ch >= 'A' && ch <= 'F');
+        })) {
+        throw std::invalid_argument("request-state key must contain exactly 64 hexadecimal characters");
+    }
+    return value;
+}
+
+bool parse_validate_output(const std::string& value) {
+    if (value == "on") {
+        return true;
+    }
+    if (value == "off") {
+        return false;
+    }
+    throw std::invalid_argument("--validate-output must be on or off");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -198,6 +220,10 @@ int main(int argc, char** argv) {
                 tls_cert = argv[++i];
             } else if (argument == "--tls-key" && i + 1 < argc) {
                 tls_key = argv[++i];
+            } else if (argument == "--request-state-key" && i + 1 < argc) {
+                options.request_state_key = parse_request_state_key(argv[++i]);
+            } else if (argument == "--validate-output" && i + 1 < argc) {
+                options.validate_output = parse_validate_output(argv[++i]);
             } else {
                 throw std::invalid_argument("unknown or incomplete option: " + argument);
             }
@@ -214,6 +240,8 @@ int main(int argc, char** argv) {
 
         cppmcp::Server server({"cppmcp-http-server", "cppmcp HTTP server", "0.1.0"});
         add_tools(server);
+        cppmcp::examples::add_phase4_tools(server);
+        server.set_validate_output(options.validate_output);
         std::jthread notifier;
         if (options.notify_interval.count() > 0) {
             notifier = std::jthread([&server, interval = options.notify_interval](

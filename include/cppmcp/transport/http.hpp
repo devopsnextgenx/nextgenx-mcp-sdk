@@ -117,6 +117,8 @@ struct HttpOptions {
     std::string bind_address = "127.0.0.1";
     unsigned short port = 8000;
     std::string bearer_token;
+    std::string request_state_key;
+    bool validate_output = true;
     bool allow_non_loopback = false;
     bool allow_insecure_remote = false;
     std::optional<HttpTlsOptions> tls;

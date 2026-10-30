@@ -1,5 +1,28 @@
 # Project decisions
 
+## Phase 4
+
+- Use jsoncons 1.10.0 for JSON Schema validation. Upstream documents Draft
+  2020-12 support, a header-only C++ API, and immutable, thread-safe compiled
+  schemas; its license is Boost Software License 1.0. FetchContent pins the
+  v1.10.0 source archive by SHA-256
+  `c829350a2eece662beb378143e2ab1c1cbb07d703687bf168626665a8a7d8bc1`.
+  This avoids the AGPL-licensed alternative and avoids implementing JSON
+  Schema semantics locally.
+- Compile input and output schemas at tool registration and retain the
+  compiled validators. External `$ref` is rejected; local fragment references
+  are bounded and evaluated without fetching remote resources.
+- A known tool with invalid arguments returns a tool execution result with
+  `isError: true`; an unknown tool remains a protocol error with `-32602`.
+- A handler result that violates `outputSchema` is treated as an internal
+  server defect. The server logs the detailed validation failure and returns a
+  generic `-32603` response without forwarding the invalid value.
+- `structuredContent` preserves the handler's original JSON value, including
+  scalar and array values. `ToolResult::structured` also emits the same JSON in
+  a text content block by default for compatibility.
+- `--validate-output` defaults to `on`; applications can disable server-side
+  output validation explicitly. Input validation is always enabled.
+
 ## Phase 1
 
 - Use nlohmann/json 3.12.0 through CMake FetchContent, pinned by archive hash.

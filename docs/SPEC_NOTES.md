@@ -184,6 +184,24 @@ specification's text representation, and requires exactly one matching header
 when the property is supplied (and for required properties). Mirrored integer
 values are restricted to JavaScript's safe integer range.
 
+## Phase 4 specification review
+
+The relevant 2026-07-28 pages were re-read: [server/tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools), [basic/patterns/mrtr](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr), [client/elicitation](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation), [basic/utilities/progress](https://modelcontextprotocol.io/specification/2026-07-28/basic/utilities/progress), [server/utilities/logging](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/logging), and [basic/versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning). The 2025-11-25 equivalents were checked for tools, elicitation, progress, logging, and lifecycle. The versioned schema used for field names is [schema.json](../schema/2026-07-28/schema.json).
+
+The 2026 tools page states: “This can be any JSON value (object, array, string, number, boolean, or null) that conforms to the tool's `outputSchema` if one is defined.” It also says: “For backwards compatibility, a tool that returns structured content SHOULD also return the serialized JSON in a TextContent block.” The implementation preserves the value without wrapping scalars and mirrors structured values into text by default.
+
+The same page states: “Servers MUST provide structured results that conform to this schema.” Invalid arguments for a known tool are therefore treated as tool execution errors (`isError: true`) so the caller can self-correct; unknown tools use the specification's invalid-params protocol error (`-32602`). A server output that violates its declared schema is an internal defect: this implementation returns a generic `-32603` and records details only in the server log.
+
+The 2026 MRTR page defines `inputRequests` as a map of server-assigned IDs to request objects and `inputResponses` as responses keyed by those same IDs. It says: “If a client request contains a `requestState` field, servers MUST treat `requestState` as an attacker-controlled input.” It further recommends binding integrity-protected state to the authenticated principal, expiry, method, and salient request parameters. Clients must echo the exact state and use a different JSON-RPC ID for the retry. At least one of `inputRequests` or `requestState` must be present in an input-required result.
+
+The elicitation capability is per-request in 2026 (`_meta.io.modelcontextprotocol/clientCapabilities`) and initialization-negotiated in 2025-11-25. The 2026 page states: “Servers MUST NOT use form mode elicitation to request sensitive information such as passwords, API keys, access tokens, or payment credentials” and “Servers MUST use URL mode for interactions involving such sensitive information.” The implementation restricts form schemas to the schema-defined flat primitive subset.
+
+Progress tokens must be strings or integers, and the 2026 progress page says: “The `progress` value MUST increase with each notification.” Notifications must only reference a token from an active request and stop when that request completes. Modern progress and logging notifications stay on the response stream for their request.
+
+The 2026 logging page says a server “MUST NOT emit `notifications/message` for a request that does not include” `io.modelcontextprotocol/logLevel`; with a requested level, messages are scoped to that request's response stream. Logging is deprecated in 2026-07-28 but remains in the schema. The implementation retains the API as deprecated and keeps legacy `logging/setLevel` separate from modern request metadata.
+
+The 2026 Subscriptions page permits a successful completion response when the server closes a `subscriptions/listen` stream itself; see the quote and gate-window clarification in [3D_EVIDENCE.md](3D_EVIDENCE.md).
+
 The original Phase 3B HTTP server included the Asio/llhttp socket listener,
 JSON responses, request-scoped SSE, cancellation on disconnect, hardening and
 authentication/route seams. Phase 3D adds the incremental SSE parser and HTTP

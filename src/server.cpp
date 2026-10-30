@@ -57,8 +57,28 @@ core::Json tool_payload(const ToolDefinition& tool) {
 
 }  // namespace
 
-Server::Server(ServerInfo info)
+Server::CompiledToolSchemas Server::compile_tool_schemas(const ToolDefinition& tool) const {
+    if (!tool.input_schema.is_object() ||
+        tool.input_schema.value("type", std::string{}) != "object") {
+        throw std::invalid_argument("tool '" + tool.name +
+                                    "' inputSchema must have root type 'object'");
+    }
+    CompiledToolSchemas schemas;
+    try {
+        schemas.input = schema_validator_->compile(tool.input_schema, schema_limits_);
+        if (!tool.output_schema.empty()) {
+            schemas.output = schema_validator_->compile(tool.output_schema, schema_limits_);
+        }
+    } catch (const std::exception& error) {
+        throw std::invalid_argument("tool '" + tool.name + "' schema: " + error.what());
+    }
+    return schemas;
+}
+
+Server::Server(ServerInfo info, core::SchemaValidationLimits schema_limits)
     : info_(std::move(info)),
+      schema_validator_(core::make_json_schema_validator()),
+      schema_limits_(schema_limits),
       subscriptions_(std::make_shared<transport::SubscriptionRegistry>()) {}
 
 void Server::notify_tools_list_changed() {
@@ -167,10 +187,12 @@ std::stop_token ToolContext::cancellation_token() const noexcept {
 }
 
 void Server::add_tool(ToolDefinition tool) {
+    const auto schemas = compile_tool_schemas(tool);
     std::lock_guard<std::mutex> lock(mutex_);
     CPPMCP_LOG_DEBUG("registering tool '" << tool.name << "'");
     context_handlers_.erase(tool.name);
     header_params_.erase(tool.name);
+    compiled_tool_schemas_[tool.name] = schemas;
     tools_[tool.name] = std::move(tool);
 }
 
@@ -178,21 +200,25 @@ void Server::add_tool(ToolDefinition tool, ContextToolHandler context_handler) {
     if (!context_handler) {
         throw std::invalid_argument("context tool handler must not be empty");
     }
+    const auto schemas = compile_tool_schemas(tool);
     std::lock_guard<std::mutex> lock(mutex_);
     CPPMCP_LOG_DEBUG("registering context tool '" << tool.name << "'");
     header_params_.erase(tool.name);
+    compiled_tool_schemas_[tool.name] = schemas;
     context_handlers_[tool.name] = std::move(context_handler);
     tools_[tool.name] = std::move(tool);
 }
 
 void Server::add_tool(ToolBuilder tool) {
     tool.validate_and_annotate();
+    const auto schemas = compile_tool_schemas(tool.tool_);
     std::lock_guard<std::mutex> lock(mutex_);
     const auto name = tool.tool_.name;
     CPPMCP_LOG_DEBUG("registering tool '" << name << "' with "
                                           << tool.header_params_.size()
                                           << " mirrored parameter(s)");
     context_handlers_.erase(name);
+    compiled_tool_schemas_[name] = schemas;
     header_params_[name] = std::move(tool.header_params_);
     tools_[name] = std::move(tool.tool_);
 }
@@ -202,14 +228,20 @@ void Server::add_tool(ToolBuilder tool, ContextToolHandler context_handler) {
         throw std::invalid_argument("context tool handler must not be empty");
     }
     tool.validate_and_annotate();
+    const auto schemas = compile_tool_schemas(tool.tool_);
     std::lock_guard<std::mutex> lock(mutex_);
     const auto name = tool.tool_.name;
     CPPMCP_LOG_DEBUG("registering context tool '" << name << "' with "
                                                   << tool.header_params_.size()
                                                   << " mirrored parameter(s)");
+    compiled_tool_schemas_[name] = schemas;
     context_handlers_[name] = std::move(context_handler);
     header_params_[name] = std::move(tool.header_params_);
     tools_[name] = std::move(tool.tool_);
+}
+
+void Server::set_validate_output(bool enabled) noexcept {
+    validate_output_.store(enabled, std::memory_order_relaxed);
 }
 
 bool Server::has_tool(const std::string& name) const {
@@ -314,6 +346,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
         // (a handler that calls add_tool(), or a slow one, must not block the server).
         decltype(ToolDefinition::handler) handler;
         ContextToolHandler context_handler;
+        CompiledToolSchemas schemas;
         bool found = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -325,13 +358,17 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
                 if (contextual != context_handlers_.end()) {
                     context_handler = contextual->second;
                 }
+                const auto compiled = compiled_tool_schemas_.find(name);
+                if (compiled != compiled_tool_schemas_.end()) {
+                    schemas = compiled->second;
+                }
             }
         }
         if (!found) {
             CPPMCP_LOG_WARN("tools/call for unknown tool '" << name << "'");
             return core::ErrorResponse{request.id,
-                                      core::protocol_error(core::ErrorCode::method_not_found,
-                                                           "Unknown tool")};
+                                      core::protocol_error(core::ErrorCode::invalid_params,
+                                                           "Unknown tool: " + name)};
         }
 
         auto finalize = [&](nlohmann::json payload) -> core::Message {
@@ -344,9 +381,22 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
         };
 
         CPPMCP_LOG_DEBUG("calling tool '" << name << "'");
+        const auto arguments = request.params.value("arguments", nlohmann::json::object());
+        if (schemas.input) {
+            const auto validation_error = schemas.input->validate(arguments);
+            if (validation_error) {
+                std::string message = "Invalid tool arguments";
+                if (!validation_error->instance_path.empty()) {
+                    message += " at " + validation_error->instance_path;
+                }
+                message += ": " + validation_error->message;
+                return finalize({{"content", nlohmann::json::array(
+                                               {{{"type", "text"}, {"text", message}}})},
+                                 {"isError", true}});
+            }
+        }
         nlohmann::json result;
         try {
-            const auto arguments = request.params.value("arguments", nlohmann::json::object());
             if (context_handler) {
                 ToolContext fallback;
                 result = context_handler(arguments, request.params,
@@ -362,18 +412,36 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             return finalize({{"content", std::move(content)}, {"isError", true}});
         }
 
-        nlohmann::json content = nlohmann::json::array();
-        content.push_back({{"type", "text"}, {"text", result.dump()}});
-        nlohmann::json payload = {{"content", std::move(content)}};
-        if (result.is_object()) {
-            if (!result.contains("isError")) {
-                payload["structuredContent"] = result;
-            }
+        const bool explicit_tool_result = result.is_object() &&
+                                          result.value("__cppmcp_tool_result", false) &&
+                                          result.contains("payload") && result["payload"].is_object();
+        nlohmann::json payload;
+        bool is_error = false;
+        if (explicit_tool_result) {
+            payload = std::move(result["payload"]);
+            is_error = result.value("isError", false);
         } else {
-            // structuredContent must be a JSON object, so wrap scalars/arrays/null.
-            nlohmann::json wrapped = nlohmann::json::object();
-            wrapped["result"] = result;
-            payload["structuredContent"] = std::move(wrapped);
+            payload = {{"content", nlohmann::json::array(
+                                        {{{"type", "text"}, {"text", result.dump()}}})},
+                       {"structuredContent", result}};
+        }
+        if (is_error) {
+            payload["isError"] = true;
+        } else if (schemas.output && validate_output_.load(std::memory_order_relaxed)) {
+            const auto structured = payload.find("structuredContent");
+            const auto validation_error = structured == payload.end()
+                                              ? std::optional<core::SchemaValidationError>(
+                                                    core::SchemaValidationError{
+                                                        {}, "structuredContent is missing"})
+                                              : schemas.output->validate(*structured);
+            if (validation_error) {
+                CPPMCP_LOG_ERROR("tool '" << name << "' returned output that violates its schema: "
+                                          << validation_error->message);
+                return core::ErrorResponse{
+                    request.id,
+                    core::protocol_error(core::ErrorCode::internal_error,
+                                         "Tool output did not conform to its declared schema")};
+            }
         }
         return finalize(std::move(payload));
     }
