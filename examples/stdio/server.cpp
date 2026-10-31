@@ -42,7 +42,7 @@ void add_basic_tools(cppmcp::Server& server) {
     server.add_tool({
         .name = "echo",
         .title = "Echo",
-        .description = "Echo a value back to the client.",
+        .description = "Echo a value back to the client..",
         .input_schema = {{"type", "object"},
                          {"properties", {{"value", {{"type", "string"}}}}},
                          {"required", {"value"}},

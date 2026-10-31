@@ -3,9 +3,71 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Where to run the Linux job (auto = self-hosted if an idle runner is online, else GitHub-hosted)
+        type: choice
+        options: [auto, github-hosted, self-hosted]
+        default: auto
+
+permissions:
+  contents: read
 
 jobs:
+  # Decide self-hosted vs GitHub-hosted. A job queued for an offline self-hosted runner
+  # waits up to 24 h, so availability is checked first. Listing runners needs a token with
+  # repository "Administration: read" (GITHUB_TOKEN cannot), stored as secret RUNNER_ADMIN_TOKEN.
+  # Without the secret, "auto" safely means GitHub-hosted.
+  pick-runner:
+    runs-on: ubuntu-latest
+    outputs:
+      linux: ${{ steps.pick.outputs.linux }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.RUNNER_ADMIN_TOKEN }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ inputs.runner || 'auto' }}
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          LABEL: cppmcp-linux
+        run: |
+          set -uo pipefail
+
+          # Never run fork PR code on a self-hosted machine.
+          if [ "$EVENT" = "pull_request" ] && [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "::notice::Fork PR: forcing GitHub-hosted."
+            echo "linux=false" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          runners=""
+          if [ -n "${GH_TOKEN:-}" ]; then
+            # one line per runner: status <TAB> busy <TAB> comma-separated labels
+            runners="$(gh api --paginate "repos/${REPO}/actions/runners" \
+              --jq '.runners[] | [.status, (.busy | tostring), ([.labels[].name] | join(","))] | @tsv' 2>/dev/null)" || runners=""
+          else
+            echo "::notice::RUNNER_ADMIN_TOKEN is not set: cannot see local runners, 'auto' uses GitHub-hosted."
+          fi
+
+          # idle: an online, not busy runner that carries the label
+          idle() {
+            [ -n "$runners" ] || return 1
+            echo "$runners" | awk -F'\t' -v l="$LABEL" '
+              $1 == "online" && $2 == "false" { n = split($3, a, ","); for (i = 1; i <= n; i++) if (a[i] == l) f = 1 }
+              END { exit !f }'
+          }
+
+          case "$MODE" in
+            self-hosted)   result=true ;;
+            github-hosted) result=false ;;
+            *)             if idle; then result=true; else result=false; fi ;;
+          esac
+          echo "linux=$result" | tee -a "$GITHUB_OUTPUT"
+
   foundation:
+    needs: pick-runner
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +79,8 @@ jobs:
           #   platform: macos
           # - os: windows-latest
           #   platform: windows
-    runs-on: ${{ matrix.os }}
+    # Linux entry: self-hosted when one was picked, else the matrix OS. Other OSes always GitHub-hosted.
+    runs-on: ${{ (matrix.platform == 'linux' && needs.pick-runner.outputs.linux == 'true') && fromJSON('["self-hosted","cppmcp-linux"]') || matrix.os }}
     defaults:
       run:
         shell: bash
