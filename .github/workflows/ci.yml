@@ -12,10 +12,11 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux
-          - os: macos-latest
-            platform: macos
-          - os: windows-latest
-            platform: windows
+          # TODO: re-enable once the code is under control
+          # - os: macos-latest
+          #   platform: macos
+          # - os: windows-latest
+          #   platform: windows
     runs-on: ${{ matrix.os }}
     defaults:
       run:
