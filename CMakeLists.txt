@@ -10,6 +10,7 @@ option(CPPMCP_BUILD_SHARED "Build the shared library" ON)
 option(CPPMCP_BUILD_STATIC "Build the static library" ON)
 option(CPPMCP_BUILD_TESTS "Build unit tests" ON)
 option(CPPMCP_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
+option(CPPMCP_BUILD_EXAMPLES "Build the stdio and HTTP examples" ON)
 option(CPPMCP_ENABLE_LEGACY "Enable legacy protocol support" ON)
 option(CPPMCP_OFFLINE "Do not fetch dependencies from the network" OFF)
 find_package(OpenSSL 3 QUIET)
@@ -296,25 +297,48 @@ install(FILES
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cppmcp
 )
 
-add_executable(cppmcp_stdio_server examples/stdio_server.cpp)
-target_link_libraries(cppmcp_stdio_server PRIVATE cppmcp::server cppmcp::transport_stdio)
-target_compile_features(cppmcp_stdio_server PRIVATE cxx_std_20)
-cppmcp_configure_warnings(cppmcp_stdio_server)
+# ---------------------------------------------------------------------------
+# Examples
+#
+#   examples/common/  shared headers (phase-4 tools, FeatureRegistry, client helpers, tours)
+#   examples/stdio/   server.cpp, client.cpp
+#   examples/http/    server.cpp, client.cpp, front_door.hpp, augmenting_exchange.hpp
+#
+# The example sources include their shared headers by relative path ("../common/...") and use
+# std::jthread, so they only need Threads in addition to the cppmcp targets. The nlohmann_json
+# include directory reaches them through the cppmcp library targets' PUBLIC include paths.
+# examples/extras/ holds unbuilt reference material and is intentionally not listed here.
+# ---------------------------------------------------------------------------
+if(CPPMCP_BUILD_EXAMPLES)
+    if(NOT CPPMCP_BUILD_STATIC)
+        message(FATAL_ERROR "CPPMCP_BUILD_EXAMPLES requires CPPMCP_BUILD_STATIC=ON "
+                            "(the server/client/transport libraries are static-only)")
+    endif()
+    find_package(Threads REQUIRED)
 
-add_executable(cppmcp_stdio_client examples/stdio_client.cpp)
-target_link_libraries(cppmcp_stdio_client PRIVATE cppmcp::client cppmcp::transport_stdio)
-target_compile_features(cppmcp_stdio_client PRIVATE cxx_std_20)
-cppmcp_configure_warnings(cppmcp_stdio_client)
+    function(cppmcp_add_example target source)
+        add_executable(${target} ${source})
+        target_compile_features(${target} PRIVATE cxx_std_20)
+        set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+        target_link_libraries(${target} PRIVATE ${ARGN} Threads::Threads)
+        cppmcp_configure_warnings(${target})
+    endfunction()
 
-add_executable(cppmcp_http_server examples/http_server/main.cpp)
-target_link_libraries(cppmcp_http_server PRIVATE cppmcp::server cppmcp::transport_http)
-target_compile_features(cppmcp_http_server PRIVATE cxx_std_20)
-cppmcp_configure_warnings(cppmcp_http_server)
+    cppmcp_add_example(cppmcp_stdio_server examples/stdio/server.cpp
+        cppmcp::server cppmcp::transport_stdio)
+    cppmcp_add_example(cppmcp_stdio_client examples/stdio/client.cpp
+        cppmcp::client cppmcp::transport_stdio)
 
-add_executable(cppmcp_http_client examples/http_client/main.cpp)
-target_link_libraries(cppmcp_http_client PRIVATE cppmcp::client cppmcp::transport_http)
-target_compile_features(cppmcp_http_client PRIVATE cxx_std_20)
-cppmcp_configure_warnings(cppmcp_http_client)
+    # The HTTP example's front door (examples/http/front_door.hpp) uses POSIX sockets.
+    if(NOT WIN32)
+        cppmcp_add_example(cppmcp_http_server examples/http/server.cpp
+            cppmcp::server cppmcp::transport_http)
+        cppmcp_add_example(cppmcp_http_client examples/http/client.cpp
+            cppmcp::client cppmcp::transport_http)
+    else()
+        message(STATUS "cppmcp: skipping HTTP examples (POSIX-only front door)")
+    endif()
+endif()
 
 if(CPPMCP_BUILD_TESTS)
     enable_testing()

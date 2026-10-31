@@ -11,6 +11,7 @@ Options:
   --no-deps    Configure offline using an existing FetchContent cache
   --shared     Build the shared library
   --static     Build the static library
+  --examples   Build the example applications
   --package    Stage installable headers/libraries and create a tar.gz archive
   --help       Show this help
 
@@ -57,6 +58,7 @@ fi
 fetch_deps=ON
 build_shared=
 build_static=
+build_examples=
 package=OFF
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -64,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --no-deps) fetch_deps=OFF ;;
         --shared) build_shared=ON ;;
         --static) build_static=ON ;;
+        --examples) build_examples=ON ;;
         --package) package=ON ;;
         --help) usage; exit 0 ;;
         *)
@@ -75,12 +78,14 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if [[ -z "$build_shared" && -z "$build_static" ]]; then
+if [[ -z "$build_shared" && -z "$build_static" && -z "$build_examples" ]]; then
     build_shared=ON
     build_static=ON
+    build_examples=ON
 fi
 build_shared=${build_shared:-OFF}
 build_static=${build_static:-OFF}
+build_examples=${build_examples:-OFF}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 build_dir="$root/build/$platform"
@@ -90,6 +95,7 @@ cmake_args=(
     -B "$build_dir"
     "-DCPPMCP_BUILD_SHARED=$build_shared"
     "-DCPPMCP_BUILD_STATIC=$build_static"
+    "-DCPPMCP_BUILD_EXAMPLES=$build_examples"
     "-DCPPMCP_OFFLINE=$([[ "$fetch_deps" == ON ]] && printf OFF || printf ON)"
 )
 
