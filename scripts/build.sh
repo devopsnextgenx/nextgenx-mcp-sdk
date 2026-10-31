@@ -58,10 +58,10 @@ fi
 
 fetch_deps=ON
 build_shared=
-build_static=
+build_static=ON
 build_examples=
 build_legacy=OFF
-package=OFF
+package=ON
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --deps) fetch_deps=ON ;;
