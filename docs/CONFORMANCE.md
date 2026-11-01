@@ -1,5 +1,45 @@
 # Conformance Results
 
+## Root cause and repeatable fixture
+
+The earlier Phase 5 failures were caused by running the published 2025-11-25
+suite against the HTTP demo fixture rather than a dedicated conformance fixture.
+The demo omits the suite's fixed tool fixtures, and the published CLI does not
+include the SDK's 2026-07-28 protocol profile. Those results are useful
+compatibility triage, not a claim that the modern protocol is nonconformant.
+
+Build and run the dedicated fixture with:
+
+```sh
+cmake --build build --target cppmcp_conformance_server
+./build/cppmcp_conformance_server --port 8001
+```
+
+In another terminal, run the published legacy profile using the exact CLI
+command below. The server includes representative prompt, resource, template
+and text-tool fixtures; scenarios requiring unsupported client-side sampling
+or elicitation are reported separately rather than inferred from a failed
+scenario summary.
+
+```sh
+npx -y @modelcontextprotocol/conformance server \
+  --url http://127.0.0.1:8001/mcp \
+  --spec-version 2025-11-25 --verbose
+```
+
+For targeted regression, the conformance server was run with the following
+individual scenarios at `--spec-version 2025-11-25`. Each command reported
+`Passed: 1/1, 0 failed, 0 warnings`:
+
+| Scenario | Fixture exercised | Result |
+| --- | --- | --- |
+| `resources-list` | Resource catalog | Pass |
+| `resources-read-text` | `test://static-text` | Pass |
+| `resources-templates-read` | `test://template/123/data` | Pass |
+| `prompts-list` | Prompt catalog | Pass |
+| `prompts-get-simple` | `test_simple_prompt` | Pass |
+| `tools-list` | `test_simple_text` | Pass |
+
 ## Phase 5 Profile
 
 The official `@modelcontextprotocol/conformance` CLI was re-run against the

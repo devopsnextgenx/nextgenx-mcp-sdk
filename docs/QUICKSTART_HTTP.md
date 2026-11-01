@@ -41,7 +41,12 @@ exercises the round limit.
 `__KEY__` for the server-assigned input ID. Do not guess IDs or manufacture a
 state token. State is authenticated but readable and must not contain secrets.
 For local cross-instance testing pass identical `--request-state-key` values;
-use protected `ServerOptions::request_state_keys` in applications.
+the example also accepts `--request-state-key-file PATH` or reads
+`CPPMCP_REQUEST_STATE_KEY` when neither CLI option is set. The file or
+environment value must be exactly 64 hexadecimal characters (a final newline
+in the file is ignored). Use protected secret storage and
+`ServerOptions::request_state_keys` in applications; explicit CLI input takes
+precedence over the key file, which takes precedence over the environment.
 
 For C++ clients, set `CallToolOptions::on_elicit`, `max_rounds` and `timeout`.
 Form support is advertised only with a handler. URL handling additionally needs
@@ -347,6 +352,23 @@ To see pagination, restart the example with `--page-size 2`. Each list method
 returns an opaque `nextCursor` when another page is available; pass that exact
 cursor in the next request's params. Cursors are scoped to the list kind and
 registry instance.
+
+The C++ `Client` exposes matching feature methods and cursor aggregation:
+
+```cpp
+const auto prompt_page = client.list_prompts();
+const auto every_prompt = client.list_all_prompts();
+const auto prompt = client.get_prompt("summarize", {{"text", "hello"}});
+const auto resources = client.list_all_resources();
+const auto resource = client.read_resource("demo://readme");
+```
+
+`list_all_prompts()` and `list_all_resources()` follow opaque cursors and reject
+repeated or malformed continuation cursors. Successful responses with a
+positive `ttlMs` are cached in the client's bounded `ClientCache`; resource
+updates and prompt/resource list-change notifications invalidate that cache.
+`Client::subscribe_resource()` retains subscriptions across a fresh
+`connect_http()` and re-establishes the corresponding stream/RPC subscription.
 
 Prompt and resource handlers can also request input. The bundled client drives
 the modern `requestState` continuation automatically when an elicitation action

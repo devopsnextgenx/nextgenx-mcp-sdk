@@ -1727,6 +1727,28 @@ void Client::connect_http(HttpClientOptions options) {
     auto http = std::make_shared<transport::HttpClientTransport>(std::move(options));
     connect(http);
     legacy_transport_ = !http->is_modern();
+    resubscribe_resources();
+}
+
+void Client::resubscribe_resources() {
+    std::lock_guard update_lock(resource_subscription_update_mutex_);
+    const auto http_transport =
+        std::dynamic_pointer_cast<transport::HttpClientTransport>(transport_);
+    if (!connection_ || !http_transport) {
+        throw std::runtime_error("resource resubscription requires a connected HTTP client");
+    }
+    std::vector<std::string> uris;
+    {
+        std::lock_guard lock(resource_subscription_mutex_);
+        uris.reserve(resource_callbacks_.size());
+        for (const auto& [uri, _] : resource_callbacks_) uris.push_back(uri);
+    }
+    if (!http_transport->is_modern()) {
+        for (const auto& uri : uris) {
+            (void)connection_->send_request("resources/subscribe", {{"uri", uri}}).get();
+        }
+    }
+    refresh_resource_listener();
 }
 
 std::string Client::http_mode() const {

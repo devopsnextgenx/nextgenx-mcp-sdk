@@ -406,8 +406,10 @@ inline bool is_terminal(const std::string& status) {
 
 class FileResourceProvider {
 public:
-    explicit FileResourceProvider(std::string root, std::size_t max_bytes)
-        : root_(std::move(root)), max_bytes_(max_bytes) {}
+    explicit FileResourceProvider(std::string root, std::size_t max_bytes,
+                                  bool allow_unsafe_windows_sandbox = false)
+        : root_(std::move(root)), max_bytes_(max_bytes),
+          allow_unsafe_windows_sandbox_(allow_unsafe_windows_sandbox) {}
 
     std::optional<ResourceContent> read(std::string path) const {
         if (!safe_path(path)) return std::nullopt;
@@ -471,6 +473,7 @@ public:
         ::close(file_fd);
         ::close(root_fd);
 #else
+        if (!allow_unsafe_windows_sandbox_) return std::nullopt;
         const auto root_path = std::filesystem::weakly_canonical(root_);
         const auto candidate = std::filesystem::weakly_canonical(root_path / path);
         auto root_text = root_path.native();
@@ -586,6 +589,7 @@ private:
 
     std::string root_;
     std::size_t max_bytes_;
+    bool allow_unsafe_windows_sandbox_;
 };
 
 // ---------------------------------------------------------------------------

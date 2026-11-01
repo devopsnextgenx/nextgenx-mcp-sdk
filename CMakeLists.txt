@@ -52,6 +52,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(jsoncons)
 
+set(RE2_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    re2
+    URL https://github.com/google/re2/archive/refs/tags/2023-03-01.tar.gz
+    URL_HASH SHA256=7a9a4824958586980926a300b4717202485c4b4115ac031822e29aa4ef207e48
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(re2)
+set_target_properties(re2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set(JSONCONS_SOURCE_DIR "${jsoncons_SOURCE_DIR}")
+include(cmake/patch_jsoncons_re2.cmake)
+
 FetchContent_Declare(
     asio
     URL https://github.com/chriskohlhoff/asio/archive/refs/tags/asio-1-30-2.tar.gz
@@ -147,7 +159,7 @@ if(CPPMCP_BUILD_STATIC)
     add_library(cppmcp_core STATIC ${CPPMCP_SOURCES})
     add_library(cppmcp::core ALIAS cppmcp_core)
     cppmcp_configure_library(cppmcp_core)
-    target_link_libraries(cppmcp_core PUBLIC OpenSSL::Crypto)
+    target_link_libraries(cppmcp_core PUBLIC OpenSSL::Crypto PRIVATE re2::re2)
     set_target_properties(cppmcp_core PROPERTIES EXPORT_NAME core)
 
     add_library(cppmcp_server STATIC ${CPPMCP_SERVER_SOURCES})
@@ -268,7 +280,7 @@ if(CPPMCP_BUILD_SHARED)
     add_library(cppmcp_core_shared SHARED ${CPPMCP_SOURCES})
     add_library(cppmcp::core_shared ALIAS cppmcp_core_shared)
     cppmcp_configure_library(cppmcp_core_shared)
-    target_link_libraries(cppmcp_core_shared PUBLIC OpenSSL::Crypto)
+    target_link_libraries(cppmcp_core_shared PUBLIC OpenSSL::Crypto PRIVATE re2::re2)
     set_target_properties(cppmcp_core_shared PROPERTIES
         EXPORT_NAME core_shared
         OUTPUT_NAME cppmcp_core_shared
@@ -349,6 +361,9 @@ if(CPPMCP_BUILD_EXAMPLES)
         cppmcp::server cppmcp::transport_stdio)
     cppmcp_add_example(cppmcp_stdio_client examples/stdio/client.cpp
         cppmcp::client cppmcp::transport_stdio)
+
+    cppmcp_add_example(cppmcp_conformance_server examples/conformance_server.cpp
+        cppmcp::server cppmcp::transport_http)
 
     # The HTTP example's front door (examples/http/front_door.hpp) uses POSIX sockets.
     if(NOT WIN32)
@@ -437,6 +452,7 @@ if(CPPMCP_BUILD_TESTS)
             request_state_subject
             progress logging
             phase2_memory phase2_stdio
+            client_prompts client_resources client_completion client_cache client_resubscribe
             http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types
             cancellation
             http_server_methods http_server_host_origin

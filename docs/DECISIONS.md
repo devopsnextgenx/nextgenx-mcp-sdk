@@ -9,6 +9,12 @@
   `c829350a2eece662beb378143e2ab1c1cbb07d703687bf168626665a8a7d8bc1`.
   This avoids the AGPL-licensed alternative and avoids implementing JSON
   Schema semantics locally.
+- Patch jsoncons's schema `pattern` and `patternProperties` validators to use
+  RE2 2023-03-01, fetched from its upstream archive with SHA-256
+  `7a9a4824958586980926a300b4717202485c4b4115ac031822e29aa4ef207e48`.
+  The configure-time patch is version-guarded by expected source markers and
+  leaves non-schema format validation unchanged. RE2 is installed and exported
+  as a required CMake dependency of the SDK.
 - Compile input and output schemas at tool registration and retain the
   compiled validators. External `$ref` is rejected; local fragment references
   are bounded and evaluated without fetching remote resources.
@@ -26,8 +32,8 @@
   `89e83a74014617ffbe79a56d83d14d054cd11417`, archive SHA-256
   `70e238f62ee2d5143e9b292109dbf054f5055d31111ae20f75af754807c5323a`.
   Each Draft 2020-12 category is a CTest case. Report policy exclusions as skips,
-  not passes or generic backend failures. Unicode regex properties are outside
-  the bounded standard-regex profile.
+  not passes or generic backend failures. Regex matching uses the bounded RE2
+  engine; Unicode properties supported by the pinned RE2 release are available.
 - `IRequestStateCodec` separates continuation state from transport. The default
   HMAC codec binds the original operation/principal, has a ten-minute TTL and
   supports key rotation. Claims are signed, not encrypted or single-use.

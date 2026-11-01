@@ -1,9 +1,62 @@
 #include "cppmcp/client.hpp"
 
 #include <exception>
+#include <set>
 #include <stdexcept>
 
 namespace cppmcp {
+
+ClientCache::ClientCache(std::size_t max_entries) : max_entries_(max_entries) {
+    if (max_entries_ == 0) {
+        throw std::invalid_argument("client cache requires a positive entry limit");
+    }
+}
+
+std::optional<nlohmann::json> ClientCache::get(std::string_view key) {
+    std::lock_guard lock(mutex_);
+    const auto found = entries_.find(std::string(key));
+    if (found == entries_.end()) return std::nullopt;
+    if (std::chrono::steady_clock::now() >= found->second.expires) {
+        entries_.erase(found);
+        return std::nullopt;
+    }
+    return found->second.value;
+}
+
+void ClientCache::put(std::string key, nlohmann::json value,
+                      std::chrono::milliseconds ttl) {
+    if (key.empty()) throw std::invalid_argument("client cache key must not be empty");
+    std::lock_guard lock(mutex_);
+    if (ttl.count() <= 0) {
+        entries_.erase(key);
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (now >= it->second.expires) it = entries_.erase(it);
+        else ++it;
+    }
+    if (!entries_.contains(key) && entries_.size() >= max_entries_) {
+        entries_.erase(entries_.begin());
+    }
+    entries_.insert_or_assign(std::move(key),
+                              Entry{std::move(value), now + ttl});
+}
+
+void ClientCache::erase(std::string_view key) {
+    std::lock_guard lock(mutex_);
+    entries_.erase(std::string(key));
+}
+
+void ClientCache::clear() {
+    std::lock_guard lock(mutex_);
+    entries_.clear();
+}
+
+std::size_t ClientCache::size() const {
+    std::lock_guard lock(mutex_);
+    return entries_.size();
+}
 
 Client::Client(ClientInfo info, NegotiationPolicy policy)
     : info_(std::move(info)), policy_(policy) {}
@@ -13,6 +66,8 @@ Client::~Client() {
 }
 
 void Client::connect(std::shared_ptr<cppmcp::core::ITransport> transport) {
+    if (connection_) connection_->close();
+
     legacy_transport_ = false;
     transport_ = std::move(transport);
     connection_ = std::make_shared<cppmcp::core::Connection>(transport_);
@@ -50,6 +105,11 @@ void Client::cancel(const cppmcp::core::RequestId& request_id) {
 }
 
 void Client::handle_server_notification(const core::Notification& notification) {
+    if (notification.method == "notifications/resources/updated" ||
+        notification.method == "notifications/resources/list_changed" ||
+        notification.method == "notifications/prompts/list_changed") {
+        cache_.clear();
+    }
     if (notification.method == "notifications/progress") {
         const auto token = notification.params.find("progressToken");
         if (token == notification.params.end() || !token->is_string()) {
@@ -150,6 +210,109 @@ nlohmann::json Client::list_tools() {
     }
     auto future = connection_->send_request("tools/list", {{"_meta", {{"io.modelcontextprotocol/protocolVersion", "2026-07-28"}, {"io.modelcontextprotocol/clientCapabilities", nlohmann::json::object()}, {"io.modelcontextprotocol/clientInfo", {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}}}});
     return future.get();
+}
+
+nlohmann::json Client::feature_request(const std::string& method,
+                                       nlohmann::json params) {
+    if (!connection_) {
+        throw std::runtime_error("client is not connected");
+    }
+    if (!params.is_object()) {
+        throw std::invalid_argument("feature request parameters must be an object");
+    }
+    auto& meta = params["_meta"];
+    if (!meta.is_object()) meta = nlohmann::json::object();
+    meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28";
+    meta["io.modelcontextprotocol/clientInfo"] = {
+        {"name", info_.name}, {"title", info_.title}, {"version", info_.version}};
+    const auto key = method + "|" + params.dump();
+    if (const auto cached = cache_.get(key)) return *cached;
+
+    auto result = connection_->send_request(method, params).get();
+    if (result.is_object() && result.contains("ttlMs") &&
+        result["ttlMs"].is_number_integer()) {
+        const auto ttl_ms = result["ttlMs"].get<std::int64_t>();
+        if (ttl_ms > 0) {
+            cache_.put(key, result, std::chrono::milliseconds(ttl_ms));
+        }
+    }
+    return result;
+}
+
+nlohmann::json Client::list_prompts(std::optional<std::string> cursor) {
+    auto params = nlohmann::json::object();
+    if (cursor) params["cursor"] = std::move(*cursor);
+    return feature_request("prompts/list", std::move(params));
+}
+
+std::vector<nlohmann::json> Client::list_all_prompts() {
+    return list_all("prompts/list", "prompts");
+}
+
+nlohmann::json Client::get_prompt(const std::string& name,
+                                  const nlohmann::json& arguments) {
+    if (name.empty() || !arguments.is_object()) {
+        throw std::invalid_argument("prompt request requires a name and object arguments");
+    }
+    return feature_request("prompts/get", {{"name", name}, {"arguments", arguments}});
+}
+
+nlohmann::json Client::list_resources(std::optional<std::string> cursor) {
+    auto params = nlohmann::json::object();
+    if (cursor) params["cursor"] = std::move(*cursor);
+    return feature_request("resources/list", std::move(params));
+}
+
+std::vector<nlohmann::json> Client::list_all_resources() {
+    return list_all("resources/list", "resources");
+}
+
+nlohmann::json Client::list_resource_templates(
+    std::optional<std::string> cursor) {
+    auto params = nlohmann::json::object();
+    if (cursor) params["cursor"] = std::move(*cursor);
+    return feature_request("resources/templates/list", std::move(params));
+}
+
+nlohmann::json Client::read_resource(const std::string& uri) {
+    if (uri.empty()) throw std::invalid_argument("resource URI must not be empty");
+    return feature_request("resources/read", {{"uri", uri}});
+}
+
+nlohmann::json Client::complete(const nlohmann::json& params) {
+    if (!params.is_object()) {
+        throw std::invalid_argument("completion parameters must be an object");
+    }
+    return feature_request("completion/complete", params);
+}
+
+ClientCache& Client::cache() noexcept {
+    return cache_;
+}
+
+std::vector<nlohmann::json> Client::list_all(const std::string& method,
+                                             std::string_view collection) {
+    std::vector<nlohmann::json> items;
+    std::set<std::string> seen_cursors;
+    std::optional<std::string> cursor;
+    for (std::size_t page = 0; page < 10'000; ++page) {
+        auto params = nlohmann::json::object();
+        if (cursor) params["cursor"] = *cursor;
+        const auto result = feature_request(method, std::move(params));
+        const auto values = result.find(collection);
+        if (values == result.end() || !values->is_array()) {
+            throw std::runtime_error("feature list response is missing its collection");
+        }
+        items.insert(items.end(), values->begin(), values->end());
+        const auto next = result.find("nextCursor");
+        if (next == result.end()) return items;
+        if (!next->is_string() || next->get_ref<const std::string&>().empty() ||
+            !seen_cursors.insert(next->get<std::string>()).second) {
+            throw std::runtime_error("feature list returned an invalid or repeated cursor");
+        }
+        cursor = next->get<std::string>();
+    }
+    throw std::runtime_error("feature list exceeded the maximum page count");
 }
 
 nlohmann::json Client::call_tool(const std::string& name, const nlohmann::json& args) {

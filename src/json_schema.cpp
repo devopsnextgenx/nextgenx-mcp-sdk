@@ -13,6 +13,7 @@
 
 #include <jsoncons/json.hpp>
 #include <jsoncons_ext/jsonschema/jsonschema.hpp>
+#include <re2/re2.h>
 
 namespace cppmcp::core {
 namespace {
@@ -21,102 +22,10 @@ using Json = nlohmann::json;
 using JsonconsJson = jsoncons::json;
 namespace jsonschema = jsoncons::jsonschema;
 
-struct RegexGroup {
-    bool has_unbounded_quantifier = false;
-    bool has_alternation = false;
-};
-
-bool is_repetition(std::string_view pattern, std::size_t position) {
-    if (position >= pattern.size()) {
-        return false;
-    }
-    if (pattern[position] == '*' || pattern[position] == '+' || pattern[position] == '?') {
-        return true;
-    }
-    if (pattern[position] != '{') {
-        return false;
-    }
-    const auto close = pattern.find('}', position + 1);
-    if (close == std::string_view::npos) {
-        return false;
-    }
-    return true;
-}
-
-bool has_risky_repetition(std::string_view pattern) {
-    std::vector<RegexGroup> groups(1);
-    bool in_character_class = false;
-    for (std::size_t index = 0; index < pattern.size(); ++index) {
-        const char ch = pattern[index];
-        if (ch == '\\') {
-            if (index + 1 < pattern.size() &&
-                ((pattern[index + 1] >= '1' && pattern[index + 1] <= '9') ||
-                 pattern[index + 1] == 'k' || pattern[index + 1] == 'p' || pattern[index + 1] == 'P')) {
-                return true;
-            }
-            ++index;
-            continue;
-        }
-        if (in_character_class) {
-            if (ch == ']') {
-                in_character_class = false;
-            }
-            continue;
-        }
-        if (ch == '[') {
-            in_character_class = true;
-        } else if (ch == '(') {
-            if (index + 1 < pattern.size() && pattern[index + 1] == '?') {
-                return true;
-            }
-            groups.push_back({});
-        } else if (ch == '|') {
-            groups.back().has_alternation = true;
-        } else if (ch == ')') {
-            if (groups.size() == 1) {
-                continue;
-            }
-            const auto group = groups.back();
-            groups.pop_back();
-            const bool repeated = index + 1 < pattern.size() &&
-                                  is_repetition(pattern, index + 1);
-            if (repeated && (group.has_unbounded_quantifier || group.has_alternation)) {
-                return true;
-            }
-            if (repeated) {
-                if (groups.back().has_unbounded_quantifier) {
-                    return true;
-                }
-                groups.back().has_unbounded_quantifier = true;
-            } else if (group.has_unbounded_quantifier) {
-                groups.back().has_unbounded_quantifier = true;
-            }
-            groups.back().has_alternation =
-                groups.back().has_alternation || group.has_alternation;
-        } else if (is_repetition(pattern, index)) {
-            if (ch == '{') {
-                auto cursor = index + 1;
-                while (cursor < pattern.size() && pattern[cursor] != '}') {
-                    if (pattern[cursor] == ',') {
-                        ++cursor;
-                        continue;
-                    }
-                    unsigned count = 0;
-                    const auto parsed = std::from_chars(pattern.data() + cursor,
-                                                         pattern.data() + pattern.size(), count);
-                    if (parsed.ec != std::errc{} || count > 256 || parsed.ptr == pattern.data() + cursor) {
-                        return true;
-                    }
-                    cursor = static_cast<std::size_t>(parsed.ptr - pattern.data());
-                }
-            }
-            if (groups.back().has_unbounded_quantifier) {
-                return true;
-            }
-            groups.back().has_unbounded_quantifier = true;
-        }
-    }
-    return false;
+bool valid_re2_pattern(std::string_view pattern) {
+    re2::RE2::Options options;
+    options.set_log_errors(false);
+    return re2::RE2(std::string(pattern), options).ok();
 }
 
 template <typename Visitor>
@@ -186,8 +95,9 @@ void inspect_patterns(const Json& node, const SchemaValidationLimits& limits,
                 throw std::invalid_argument("schema pattern must be a string");
             }
             const auto value = pattern->get_ref<const std::string&>();
-            if (value.size() > limits.max_pattern_bytes || has_risky_repetition(value)) {
-                throw std::invalid_argument("schema pattern exceeds the safe regex subset");
+            if (value.size() > limits.max_pattern_bytes || !valid_re2_pattern(value)) {
+                throw std::invalid_argument(
+                    "schema pattern exceeds the configured limit or is unsupported by RE2");
             }
             has_patterns = true;
         }
@@ -198,9 +108,9 @@ void inspect_patterns(const Json& node, const SchemaValidationLimits& limits,
             }
             for (auto item = patterns->begin(); item != patterns->end(); ++item) {
                 if (item.key().size() > limits.max_pattern_bytes ||
-                    has_risky_repetition(item.key())) {
+                    !valid_re2_pattern(item.key())) {
                     throw std::invalid_argument(
-                        "schema patternProperties exceeds the safe regex subset");
+                        "schema patternProperties exceeds the configured limit or is unsupported by RE2");
                 }
                 has_patterns = true;
             }

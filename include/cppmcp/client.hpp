@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -25,6 +26,27 @@ struct ClientInfo {
     std::string name;
     std::string title;
     std::string version;
+};
+
+class ClientCache {
+public:
+    explicit ClientCache(std::size_t max_entries = 256);
+
+    [[nodiscard]] std::optional<nlohmann::json> get(std::string_view key);
+    void put(std::string key, nlohmann::json value, std::chrono::milliseconds ttl);
+    void erase(std::string_view key);
+    void clear();
+    [[nodiscard]] std::size_t size() const;
+
+private:
+    struct Entry {
+        nlohmann::json value;
+        std::chrono::steady_clock::time_point expires;
+    };
+
+    std::size_t max_entries_;
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, Entry> entries_;
 };
 
 class Client {
@@ -66,15 +88,31 @@ public:
 
     nlohmann::json discover();
     nlohmann::json list_tools();
+    nlohmann::json list_prompts(std::optional<std::string> cursor = std::nullopt);
+    std::vector<nlohmann::json> list_all_prompts();
+    nlohmann::json get_prompt(const std::string& name,
+                              const nlohmann::json& arguments = nlohmann::json::object());
+    nlohmann::json list_resources(std::optional<std::string> cursor = std::nullopt);
+    std::vector<nlohmann::json> list_all_resources();
+    nlohmann::json list_resource_templates(
+        std::optional<std::string> cursor = std::nullopt);
+    nlohmann::json read_resource(const std::string& uri);
+    nlohmann::json complete(const nlohmann::json& params);
+    [[nodiscard]] ClientCache& cache() noexcept;
     nlohmann::json call_tool(const std::string& name, const nlohmann::json& args = nlohmann::json::object());
     nlohmann::json call_tool(const std::string& name, const nlohmann::json& args,
                              CallToolOptions options);
     nlohmann::json ping();
 
 private:
+    nlohmann::json feature_request(const std::string& method,
+                                  nlohmann::json params = nlohmann::json::object());
+    std::vector<nlohmann::json> list_all(const std::string& method,
+                                         std::string_view collection);
     void handle_server_notification(const core::Notification& notification);
     void handle_server_request(const core::Request& request);
     void refresh_resource_listener();
+    void resubscribe_resources();
 
     struct ActiveToolCall {
         CallToolOptions options;
@@ -96,6 +134,7 @@ private:
     std::map<std::string, ActiveToolCall> active_tool_calls_;
     std::mutex legacy_tool_call_mutex_;
     std::mutex logging_tool_call_mutex_;
+    ClientCache cache_;
     bool legacy_transport_ = false;
 };
 

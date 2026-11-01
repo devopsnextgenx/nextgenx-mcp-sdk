@@ -8,7 +8,9 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <stop_token>
@@ -168,6 +170,18 @@ std::string parse_request_state_key(const std::string& value) {
     return value;
 }
 
+std::string read_request_state_key_file(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("unable to open request-state key file");
+    std::string value((std::istreambuf_iterator<char>(input)),
+                      std::istreambuf_iterator<char>());
+    if (input.bad()) throw std::runtime_error("unable to read request-state key file");
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+        value.pop_back();
+    }
+    return parse_request_state_key(value);
+}
+
 bool parse_validate_output(const std::string& value) {
     if (value == "on") return true;
     if (value == "off") return false;
@@ -216,6 +230,7 @@ int main(int argc, char** argv) {
         cppmcp::transport::HttpOptions options;
         cppmcp::examples::FeatureOptions feature_options;
         std::string tls_cert, tls_key;
+        std::string request_state_key_file;
         std::chrono::milliseconds tick_interval{0};
         std::chrono::milliseconds churn_interval{0};
         bool sdk_listener = false;
@@ -241,9 +256,17 @@ int main(int argc, char** argv) {
             else if (argument == "--tls-cert" && i + 1 < argc) tls_cert = argv[++i];
             else if (argument == "--tls-key" && i + 1 < argc) tls_key = argv[++i];
             else if (argument == "--request-state-key" && i + 1 < argc) options.request_state_key = parse_request_state_key(argv[++i]);
+            else if (argument == "--request-state-key-file" && i + 1 < argc) request_state_key_file = argv[++i];
             else if (argument == "--validate-output" && i + 1 < argc) options.validate_output = parse_validate_output(argv[++i]);
             else if (argument == "--sdk-listener") sdk_listener = true;
             else throw std::invalid_argument("unknown or incomplete option: " + argument);
+        }
+        if (options.request_state_key.empty()) {
+            if (!request_state_key_file.empty()) {
+                options.request_state_key = read_request_state_key_file(request_state_key_file);
+            } else if (const char* key = std::getenv("CPPMCP_REQUEST_STATE_KEY")) {
+                options.request_state_key = parse_request_state_key(key);
+            }
         }
         if (tls_cert.empty() != tls_key.empty()) throw std::invalid_argument("--tls-cert and --tls-key must be supplied together");
         if (!tls_cert.empty()) {

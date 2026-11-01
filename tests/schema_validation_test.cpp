@@ -3,6 +3,7 @@
 #include "test.hpp"
 
 #include <array>
+#include <chrono>
 #include <stdexcept>
 #include <vector>
 
@@ -115,11 +116,13 @@ void test_tool_name_rule() {
 
 void test_regex_redos_budget() {
     auto validator = cppmcp::core::make_json_schema_validator();
+    const auto input = std::string(1000, 'a') + "!";
+    const auto start = std::chrono::steady_clock::now();
     for (const auto* pattern : {"(a+)+$", "(a|aa)+$", "(a|a?)+$", "([a-z]+)*$"}) {
-        CPPMCP_CHECK(throws_invalid_argument([&] {
-            validator->compile({{"type", "string"}, {"pattern", pattern}});
-        }));
+        const auto schema = validator->compile({{"type", "string"}, {"pattern", pattern}});
+        (void)schema->validate(input);
     }
+    CPPMCP_CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(1));
 }
 
 void test_schema_limits() {
@@ -149,11 +152,18 @@ void test_schema_limits() {
 
 void test_schema_regex() {
     auto validator = cppmcp::core::make_json_schema_validator();
-    for (const auto* pattern : {"(a+)+$", "(a?){10000}$", "a{1000000000}", "\\p{Letter}", "(a)\\1"}) {
+    for (const auto* pattern : {"(?=x)", "(a?){10000}$", "(a)\\1"}) {
         CPPMCP_CHECK(throws_invalid_argument([&] {
             validator->compile({{"type", "string"}, {"pattern", pattern}});
         }));
     }
+    const auto large_repeat = validator->compile(
+        {{"type", "string"}, {"pattern", "a{1000000000}"}});
+    CPPMCP_CHECK(large_repeat->validate("a").has_value());
+    const auto unicode_class = validator->compile({{"type", "string"}, {"pattern", "\\p{L}+"}});
+    CPPMCP_CHECK(!unicode_class->validate("letters"));
+    const auto overlapping = validator->compile({{"type", "string"}, {"pattern", "(a|aa)+$"}});
+    CPPMCP_CHECK(overlapping->validate("aax").has_value());
     const auto simple = validator->compile({{"type", "string"}, {"pattern", "^[a-z]+$"}});
     CPPMCP_CHECK(!simple->validate("valid"));
     CPPMCP_CHECK(simple->validate(std::string(1025, 'a')).has_value());

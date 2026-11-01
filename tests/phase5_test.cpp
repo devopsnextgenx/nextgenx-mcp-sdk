@@ -282,12 +282,18 @@ void test_phase5_case(std::string_view name) {
             file << "sandbox";
         }
         FileResourceProvider provider(root.string(), 32);
+#ifdef _WIN32
+        CPPMCP_CHECK(!provider.read("readme.txt"));
+        FileResourceProvider unsafe_provider(root.string(), 32, true);
+        CPPMCP_CHECK(unsafe_provider.read("readme.txt").has_value());
+#else
         const auto content = provider.read("readme.txt");
         CPPMCP_CHECK(content && content->text == "sandbox");
         CPPMCP_CHECK(!provider.read("../outside.txt"));
         CPPMCP_CHECK(!provider.read("%252e%252e/secret"));
         CPPMCP_CHECK(!provider.read("C:/Windows/win.ini"));
         CPPMCP_CHECK(!provider.read("hidden/.private"));
+#endif
         std::filesystem::remove_all(root);
         return;
     }

@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 
 #include "cppmcp/core/log.hpp"
 
@@ -32,6 +33,7 @@ void test_stdio_legacy_elicit();
 void test_request_state_subject();
 void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
+void test_client_api(std::string_view selected);
 void test_http_handler();
 void test_cancellation_strategy();
 void test_http_server_methods();
@@ -177,6 +179,11 @@ int main(int argc, char** argv) {
     run_selected("request_state_subject", test_request_state_subject);
     run_selected("phase2_memory", test_phase2_memory_roundtrip);
     run_selected("phase2_stdio", test_phase2_stdio_roundtrip);
+    run_selected("client_prompts", [&] { test_client_api("client_prompts"); });
+    run_selected("client_resources", [&] { test_client_api("client_resources"); });
+    run_selected("client_completion", [&] { test_client_api("client_completion"); });
+    run_selected("client_cache", [&] { test_client_api("client_cache"); });
+    run_selected("client_resubscribe", [&] { test_client_api("client_resubscribe"); });
     run_selected("http_handler", test_http_handler);
     run_selected("http_handler_mcp_param_stateless", test_http_handler_header_params_stateless);
     run_selected("http_handler_mcp_param_types",

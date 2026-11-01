@@ -2,6 +2,7 @@
 
 include(CMakeFindDependencyMacro)
 find_dependency(OpenSSL 3 COMPONENTS Crypto)
+find_dependency(re2 CONFIG)
 if(@CPPMCP_WITH_TLS@)
     find_dependency(OpenSSL 3 COMPONENTS SSL Crypto)
 endif()

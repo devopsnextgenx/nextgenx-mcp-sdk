@@ -1,3 +1,5 @@
+#include "cppmcp/client.hpp"
+#include "cppmcp/core/transport.hpp"
 #include "cppmcp/core/uri_template.hpp"
 #include "cppmcp/server.hpp"
 #include "cppmcp/server/file_resource_provider.hpp"
@@ -134,12 +136,62 @@ void exercise_protocol(bool modern) {
     std::filesystem::remove_all(root);
 }
 
+void exercise_typed_client() {
+    cppmcp::Server server({"typed-client-server", "typed client", "1.0"});
+    cppmcp::examples::FeatureOptions options;
+    options.page_size = 1;
+    server.features().configure(options);
+    server.prompt("greet")
+        .handler([](const cppmcp::examples::CallContext&, const Json&) {
+            return cppmcp::PromptResult{{
+                {"messages", Json::array({{{"role", "user"},
+                                           {"content", {{"type", "text"},
+                                                        {"text", "Hello"}}}}})}}};
+        });
+    server.prompt("second")
+        .handler([](const cppmcp::examples::CallContext&, const Json&) {
+            return cppmcp::PromptResult{{{"messages", Json::array()}}};
+        });
+    server.resource("demo://client")
+        .name("client")
+        .mime_type("text/plain")
+        .handler([](const cppmcp::examples::CallContext&) {
+            return cppmcp::ReadResult{{
+                {"contents", Json::array({{{"uri", "demo://client"}, {"text", "read"}}})}}};
+        });
+
+    auto [client_transport, server_transport] =
+        cppmcp::core::make_memory_transport_pair();
+    server_transport->on_message([&server, server_transport](
+                                     const cppmcp::core::Message& message) {
+        const auto response = server.handle_message(message);
+        if (std::holds_alternative<cppmcp::core::ResultResponse>(response) ||
+            std::holds_alternative<cppmcp::core::ErrorResponse>(response)) {
+            server_transport->send(response);
+        }
+    });
+    cppmcp::Client client;
+    client.connect(client_transport);
+    require(client.list_prompts()["prompts"].size() == 1,
+            "typed client list page failed");
+    require(client.list_all_prompts().size() == 2,
+            "typed client cursor pagination failed");
+    require(client.get_prompt("greet")["messages"][0]["content"]["text"] == "Hello",
+            "typed client prompt request failed");
+    require(client.list_resources()["resources"].size() == 1,
+            "typed client resource list failed");
+    require(client.read_resource("demo://client")["contents"][0]["text"] == "read",
+            "typed client resource read failed");
+    client.close();
+}
+
 }  // namespace
 
 int main() {
     try {
         exercise_protocol(false);
         exercise_protocol(true);
+        exercise_typed_client();
     } catch (const std::exception& error) {
         std::cerr << "api consumer failed: " << error.what() << '\n';
         return 1;
