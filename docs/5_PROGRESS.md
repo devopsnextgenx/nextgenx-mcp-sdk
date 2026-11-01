@@ -8,6 +8,12 @@ Step 0 and Slices 1–3 are committed and their acceptance gates passed:
 Phase 5 CTest coverage, four libFuzzer targets, and the requested
 protocol/security/quickstart documentation.
 
+The gates pass, but the wider Phase 5 request has documented gaps: the example
+URI-template matcher is not full RFC 6570, pagination uses offsets rather than
+stable registration-sequence cursors, registries remain example adapters
+rather than public `Server` builders, and Windows file reads lack the POSIX
+no-follow/TOCTOU guarantee. Do not treat the gate pass as full spec conformance.
+
 ## Latest verification
 
 ```text
@@ -30,4 +36,5 @@ RESULT: 92 passed, 15 failed, 0 warnings
 
 ## Next action
 
-Phase 5 is complete; Phase 6 authentication work is next.
+Close or explicitly accept the documented Phase 5 gaps before moving to Phase 6
+OAuth authentication work.
