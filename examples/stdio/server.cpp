@@ -111,7 +111,16 @@ int main(int argc, char** argv) {
 
     cppmcp::examples::FeatureRegistry registry(feature_options);
     cppmcp::examples::add_demo_features(registry);
+    registry.add_file_resource_template();
     registry.set_tool_executor(cppmcp::examples::make_tool_executor(server));
+    server.add_request_handler("prompts/get", [&registry](const cppmcp::core::Request& request,
+                                                           cppmcp::ToolContext& context) {
+        return *registry.try_handle(request, &context);
+    });
+    server.add_request_handler("resources/read", [&registry](const cppmcp::core::Request& request,
+                                                              cppmcp::ToolContext& context) {
+        return *registry.try_handle(request, &context);
+    });
 
     auto transport = std::make_shared<cppmcp::transport::StdioServerTransport>();
     // tasks/result may block while a task runs, so keep spare workers.
@@ -125,9 +134,11 @@ int main(int argc, char** argv) {
 
     connection->set_request_handler([&](const cppmcp::core::Request& request) {
         executor->post([&, request] {
-            if (auto handled = registry.try_handle(request)) {
-                transport->send(*handled);
-                return;
+            if (request.method != "prompts/get" && request.method != "resources/read") {
+                if (auto handled = registry.try_handle(request)) {
+                    transport->send(*handled);
+                    return;
+                }
             }
             std::stop_source cancellation;
             cppmcp::ToolContext context(cancellation.get_token(), [&](Json event) {

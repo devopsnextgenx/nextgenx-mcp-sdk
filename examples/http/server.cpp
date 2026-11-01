@@ -259,7 +259,16 @@ int main(int argc, char** argv) {
 
         cppmcp::examples::FeatureRegistry registry(feature_options);
         cppmcp::examples::add_demo_features(registry);
+        registry.add_file_resource_template();
         registry.set_tool_executor(cppmcp::examples::make_tool_executor(server));
+        server.add_request_handler("prompts/get", [&registry](const cppmcp::core::Request& request,
+                                                               cppmcp::ToolContext& context) {
+            return *registry.try_handle(request, &context);
+        });
+        server.add_request_handler("resources/read", [&registry](const cppmcp::core::Request& request,
+                                                                  cppmcp::ToolContext& context) {
+            return *registry.try_handle(request, &context);
+        });
         // HTTP has no connection to push on: resource updates go through the SDK's subscription
         // registry (delivered to `listen` streams); task status is polled via tasks/get.
         registry.set_notifier([&server](const std::string& method, const Json& params) {
@@ -319,10 +328,13 @@ int main(int argc, char** argv) {
                                             cppmcp::core::ErrorResponse{rpc->id, *error}));
                                     return;
                                 }
-                                if (auto handled = registry.try_handle(*rpc)) {
+                                if (rpc->method != "prompts/get" &&
+                                    rpc->method != "resources/read") {
+                                    if (auto handled = registry.try_handle(*rpc)) {
                                     exchange->respond(200, {{"Content-Type", "application/json"}},
                                                       cppmcp::core::serialize_message(*handled));
                                     return;
+                                    }
                                 }
                             }
                         }

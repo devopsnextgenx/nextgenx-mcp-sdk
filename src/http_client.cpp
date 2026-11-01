@@ -787,6 +787,18 @@ struct HttpClientTransport::Impl {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
+            if (error == asio::error::eof) {
+                const auto finished = llhttp_finish(&parser);
+                if (response.callback_error) {
+                    close_socket();
+                    std::rethrow_exception(response.callback_error);
+                }
+                if ((finished == HPE_OK || finished == HPE_PAUSED) && response.complete) {
+                    break;
+                }
+                close_socket();
+                throw std::runtime_error("incomplete HTTP response at end of stream");
+            }
             if (error) {
                 close_socket();
                 throw std::runtime_error("HTTP response read failed: " + error.message());
@@ -1528,11 +1540,17 @@ void HttpClientTransport::send(const core::Message& message) {
     }
 
     std::string name;
-    if (method == "tools/call") {
-        const auto& params = std::get<core::Request>(body_message).params;
-        if (params.contains("name") && params["name"].is_string()) {
-            name = params["name"].get<std::string>();
+    if (const auto* request = std::get_if<core::Request>(&body_message)) {
+        const auto& params = request->params;
+        if (method == "tools/call" || method == "prompts/get") {
+            if (params.contains("name") && params["name"].is_string()) {
+                name = params["name"].get<std::string>();
+            }
+        } else if (method == "resources/read" && params.contains("uri") &&
+                   params["uri"].is_string()) {
+            name = params["uri"].get<std::string>();
         }
+        if (!name.empty()) name = encode_mirrored_header_value(name);
     }
     Headers mirrored;
     if (impl_->modern && method == "tools/call") {

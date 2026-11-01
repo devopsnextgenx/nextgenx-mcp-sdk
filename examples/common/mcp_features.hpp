@@ -13,10 +13,14 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <cctype>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <memory>
@@ -30,6 +34,13 @@
 #include <thread>
 #include <variant>
 #include <vector>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#else
+#include <windows.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -57,6 +68,7 @@ struct PromptDefinition {
     std::vector<PromptArgument> arguments;
     // Returns {"description": "...", "messages": [...]}.
     std::function<Json(const Json& arguments)> render;
+    std::function<Json(const Json& arguments, ToolContext& context)> context_render = {};
 };
 
 struct ResourceContent {
@@ -71,7 +83,8 @@ struct ResourceDefinition {
     std::string title;
     std::string description;
     std::string mime_type;
-    std::function<ResourceContent()> read;
+    std::function<ResourceContent()> read = {};
+    std::function<Json(const std::string& uri, ToolContext& context)> context_read = {};
 };
 
 struct ResourceTemplateDefinition {
@@ -143,6 +156,12 @@ inline std::string percent_decode(std::string_view in) {
 // non-empty path segment.
 inline std::optional<std::map<std::string, std::string>> match_uri_template(
     std::string_view tmpl, std::string_view uri) {
+    if (tmpl.ends_with("{+path}")) {
+        const auto prefix = tmpl.substr(0, tmpl.size() - std::string_view("{+path}").size());
+        if (!uri.starts_with(prefix) || uri.size() == prefix.size()) return std::nullopt;
+        return std::map<std::string, std::string>{
+            {"path", percent_decode(uri.substr(prefix.size()))}};
+    }
     constexpr std::string_view users_template =
         "demo://users/{id}/profile{?format}";
     if (tmpl == users_template) {
@@ -278,7 +297,8 @@ inline bool modern_request(const Json& params) {
 inline Json complete_result(const core::Request& request, Json result,
                             std::optional<std::int64_t> ttl_ms = std::nullopt,
                             std::string cache_scope = "public") {
-    if (modern_request(request.params)) {
+    if (modern_request(request.params) &&
+        result.value("resultType", std::string{}) != "input_required") {
         result["resultType"] = "complete";
         if (ttl_ms) {
             result["ttlMs"] = *ttl_ms;
@@ -297,6 +317,190 @@ inline bool is_terminal(const std::string& status) {
 }
 
 }  // namespace detail
+
+class FileResourceProvider {
+public:
+    explicit FileResourceProvider(std::string root, std::size_t max_bytes)
+        : root_(std::move(root)), max_bytes_(max_bytes) {}
+
+    std::optional<ResourceContent> read(std::string path) const {
+        if (!safe_path(path)) return std::nullopt;
+#ifndef _WIN32
+        const int root_fd = ::open(root_.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        if (root_fd < 0) return std::nullopt;
+        int current_fd = root_fd;
+        std::size_t start = 0;
+        int file_fd = -1;
+        while (start < path.size()) {
+            const auto slash = path.find('/', start);
+            const bool final = slash == std::string::npos;
+            const auto component = path.substr(start, final ? std::string::npos : slash - start);
+            const int flags = O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+                              (final ? 0 : O_DIRECTORY);
+            const int next_fd = ::openat(current_fd, component.c_str(), flags);
+            if (current_fd != root_fd) ::close(current_fd);
+            if (next_fd < 0) {
+                ::close(root_fd);
+                return std::nullopt;
+            }
+            if (final) {
+                file_fd = next_fd;
+                break;
+            }
+            current_fd = next_fd;
+            start = slash + 1;
+        }
+        if (file_fd < 0) {
+            if (current_fd != root_fd) ::close(current_fd);
+            ::close(root_fd);
+            return std::nullopt;
+        }
+        struct stat info {};
+        if (::fstat(file_fd, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 0 ||
+            static_cast<std::uintmax_t>(info.st_size) > max_bytes_) {
+            ::close(file_fd);
+            ::close(root_fd);
+            return std::nullopt;
+        }
+        std::string bytes;
+        bytes.reserve(static_cast<std::size_t>(info.st_size));
+        char buffer[8192];
+        for (;;) {
+            const auto count = ::read(file_fd, buffer, sizeof(buffer));
+            if (count < 0) {
+                if (errno == EINTR) continue;
+                ::close(file_fd);
+                ::close(root_fd);
+                return std::nullopt;
+            }
+            if (count == 0) break;
+            const auto amount = static_cast<std::size_t>(count);
+            if (amount > max_bytes_ || bytes.size() > max_bytes_ - amount) {
+                ::close(file_fd);
+                ::close(root_fd);
+                return std::nullopt;
+            }
+            bytes.append(buffer, static_cast<std::size_t>(count));
+        }
+        ::close(file_fd);
+        ::close(root_fd);
+#else
+        const auto root_path = std::filesystem::weakly_canonical(root_);
+        const auto candidate = std::filesystem::weakly_canonical(root_path / path);
+        auto root_text = root_path.native();
+        auto candidate_text = candidate.native();
+        if (candidate_text.size() <= root_text.size() ||
+            candidate_text.compare(0, root_text.size(), root_text) != 0 ||
+            candidate_text[root_text.size()] != std::filesystem::path::preferred_separator) {
+            return std::nullopt;
+        }
+        std::ifstream input(candidate, std::ios::binary);
+        if (!input) return std::nullopt;
+        std::string bytes;
+        bytes.resize(max_bytes_ + 1);
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        const auto count = input.gcount();
+        if (count < 0 || static_cast<std::size_t>(count) > max_bytes_) return std::nullopt;
+        bytes.resize(static_cast<std::size_t>(count));
+#endif
+        const auto mime = mime_type(path);
+        if (text_like(mime) && valid_utf8(bytes)) {
+            return ResourceContent{std::move(bytes), std::nullopt, mime};
+        }
+        return ResourceContent{std::nullopt, encode_base64(bytes), mime};
+    }
+
+private:
+    static bool safe_path(const std::string& path) {
+        if (path.empty() || path.size() > 4096 || path.front() == '/' ||
+            path.front() == '\\' || path.find('\\') != std::string::npos ||
+            path.find('\0') != std::string::npos ||
+            (path.size() >= 2 && std::isalpha(static_cast<unsigned char>(path[0])) &&
+             path[1] == ':')) return false;
+        for (const unsigned char ch : path) {
+            if (ch < 0x20 || ch == 0x7f) return false;
+        }
+        for (std::size_t i = 0; i + 2 < path.size(); ++i) {
+            if (path[i] != '%' || !std::isxdigit(static_cast<unsigned char>(path[i + 1])) ||
+                !std::isxdigit(static_cast<unsigned char>(path[i + 2]))) continue;
+            const auto code = static_cast<unsigned char>(
+                std::stoi(path.substr(i + 1, 2), nullptr, 16));
+            if (code == '.' || code == '/' || code == '\\') return false;
+        }
+        std::size_t start = 0;
+        while (start <= path.size()) {
+            const auto slash = path.find('/', start);
+            const auto segment = path.substr(start, slash == std::string::npos
+                                                        ? std::string::npos
+                                                        : slash - start);
+            if (segment.empty() || segment == "." || segment == ".." ||
+                segment.size() > 255 || segment.front() == '.') return false;
+            if (slash == std::string::npos) break;
+            start = slash + 1;
+        }
+        return true;
+    }
+
+    static bool valid_utf8(std::string_view text) {
+        std::size_t i = 0;
+        while (i < text.size()) {
+            const auto c = static_cast<unsigned char>(text[i]);
+            if (c <= 0x7f) { ++i; continue; }
+            std::size_t extra = c >= 0xc2 && c <= 0xdf ? 1 :
+                                c >= 0xe0 && c <= 0xef ? 2 :
+                                c >= 0xf0 && c <= 0xf4 ? 3 : 0;
+            if (extra == 0 || i + extra >= text.size()) return false;
+            for (std::size_t j = 1; j <= extra; ++j) {
+                if ((static_cast<unsigned char>(text[i + j]) & 0xc0) != 0x80) return false;
+            }
+            const auto second = static_cast<unsigned char>(text[i + 1]);
+            if ((c == 0xe0 && second < 0xa0) || (c == 0xed && second >= 0xa0) ||
+                (c == 0xf0 && second < 0x90) || (c == 0xf4 && second >= 0x90)) return false;
+            i += extra + 1;
+        }
+        return true;
+    }
+
+    static std::string encode_base64(std::string_view data) {
+        static constexpr char alphabet[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        out.reserve(((data.size() + 2) / 3) * 4);
+        for (std::size_t i = 0; i < data.size(); i += 3) {
+            const auto a = static_cast<unsigned char>(data[i]);
+            const auto b = i + 1 < data.size() ? static_cast<unsigned char>(data[i + 1]) : 0;
+            const auto c = i + 2 < data.size() ? static_cast<unsigned char>(data[i + 2]) : 0;
+            out.push_back(alphabet[a >> 2]);
+            out.push_back(alphabet[((a & 3) << 4) | (b >> 4)]);
+            out.push_back(i + 1 < data.size() ? alphabet[((b & 15) << 2) | (c >> 6)] : '=');
+            out.push_back(i + 2 < data.size() ? alphabet[c & 63] : '=');
+        }
+        return out;
+    }
+
+    static std::string mime_type(const std::string& path) {
+        const auto dot = path.find_last_of('.');
+        const auto ext = dot == std::string::npos ? std::string{} : detail::lower(path.substr(dot));
+        static const std::map<std::string, std::string> types{
+            {".txt", "text/plain"}, {".md", "text/markdown"}, {".json", "application/json"},
+            {".html", "text/html"}, {".htm", "text/html"}, {".css", "text/css"},
+            {".js", "text/javascript"}, {".xml", "application/xml"},
+            {".csv", "text/csv"}, {".yaml", "application/yaml"}, {".yml", "application/yaml"},
+            {".png", "image/png"}, {".jpg", "image/jpeg"}, {".jpeg", "image/jpeg"},
+            {".gif", "image/gif"}, {".pdf", "application/pdf"}};
+        const auto it = types.find(ext);
+        return it == types.end() ? "application/octet-stream" : it->second;
+    }
+
+    static bool text_like(const std::string& mime) {
+        return mime.starts_with("text/") || mime == "application/json" ||
+               mime == "application/xml" || mime == "application/yaml" ||
+               mime == "text/javascript";
+    }
+
+    std::string root_;
+    std::size_t max_bytes_;
+};
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -327,6 +531,21 @@ public:
     void add_resource_template(ResourceTemplateDefinition tmpl) {
         std::lock_guard lock(mutex_);
         templates_.push_back(std::move(tmpl));
+    }
+    void add_file_resource_template() {
+        if (options_.resource_root.empty()) return;
+        auto provider = std::make_shared<FileResourceProvider>(
+            options_.resource_root, options_.max_resource_bytes);
+        add_resource_template({
+            .uri_template = "demo://files/{+path}",
+            .name = "file",
+            .title = "Sandboxed file",
+            .description = "Read a file beneath the configured resource root.",
+            .mime_type = "application/octet-stream",
+            .read = [provider](const std::map<std::string, std::string>& vars) {
+                return provider->read(vars.at("path"));
+            },
+        });
     }
     void add_prompt_completion(std::string prompt, std::string argument, CompletionFn fn) {
         std::lock_guard lock(mutex_);
@@ -390,14 +609,15 @@ public:
     }
 
     // -- dispatch ----------------------------------------------------------
-    std::optional<core::Message> try_handle(const core::Request& request) {
+    std::optional<core::Message> try_handle(const core::Request& request,
+                                            ToolContext* context = nullptr) {
         const auto& m = request.method;
         try {
             if (m == "prompts/list") return prompts_list(request);
-            if (m == "prompts/get") return prompts_get(request);
+            if (m == "prompts/get") return prompts_get(request, context);
             if (m == "resources/list") return resources_list(request);
             if (m == "resources/templates/list") return templates_list(request);
-            if (m == "resources/read") return resources_read(request);
+            if (m == "resources/read") return resources_read(request, context);
             if (m == "resources/subscribe") return subscribe(request, true);
             if (m == "resources/unsubscribe") return subscribe(request, false);
             if (m == "completion/complete") return complete(request);
@@ -472,7 +692,7 @@ private:
                                        60'000));
     }
 
-    core::Message prompts_get(const core::Request& request) {
+    core::Message prompts_get(const core::Request& request, ToolContext* context = nullptr) {
         const auto name = request.params.value("name", std::string{});
         PromptDefinition prompt;
         {
@@ -491,7 +711,9 @@ private:
                 return detail::invalid_params(request, "Missing required argument: " + a.name);
             }
         }
-        Json rendered = prompt.render ? prompt.render(arguments) : Json::object();
+        Json rendered = context != nullptr && prompt.context_render
+                            ? prompt.context_render(arguments, *context)
+                            : prompt.render ? prompt.render(arguments) : Json::object();
         if (!rendered.contains("messages")) rendered["messages"] = Json::array();
         if (!rendered.contains("description") && !prompt.description.empty()) {
             rendered["description"] = prompt.description;
@@ -553,10 +775,11 @@ private:
                               60'000));
     }
 
-    core::Message resources_read(const core::Request& request) {
+    core::Message resources_read(const core::Request& request, ToolContext* context = nullptr) {
         const auto uri = request.params.value("uri", std::string{});
         if (uri.empty()) return detail::invalid_params(request, "uri is required");
         std::function<ResourceContent()> reader;
+        std::function<Json(const std::string&, ToolContext&)> context_reader;
         std::string mime;
         std::function<std::optional<ResourceContent>()> template_reader;
         {
@@ -564,6 +787,7 @@ private:
             for (const auto& r : resources_) {
                 if (r.uri == uri) {
                     reader = r.read;
+                    context_reader = r.context_read;
                     mime = r.mime_type;
                     break;
                 }
@@ -579,6 +803,16 @@ private:
             }
         }
         std::optional<ResourceContent> content;
+        if (context_reader) {
+            ToolContext fallback({}, {}, request.params);
+            auto result = context_reader(uri, context == nullptr ? fallback : *context);
+            if (result.value("resultType", std::string{}) == "input_required") {
+                return detail::ok(request, std::move(result));
+            }
+            return detail::ok(request, detail::complete_result(
+                                           request, std::move(result),
+                                           uri == "demo://counter" ? 0 : 60'000));
+        }
         if (reader) content = reader();
         else if (template_reader) content = template_reader();
         if (!content) {
@@ -635,7 +869,13 @@ private:
                 return detail::invalid_params(request, "Unsupported ref type: " + ref_type);
             }
         }
-        std::vector<std::string> values = fn ? fn(value, context) : std::vector<std::string>{};
+        if (!fn) return detail::invalid_params(request, "Unknown completion argument: " + arg_name);
+        std::vector<std::string> values;
+        try {
+            values = fn(value, context);
+        } catch (const std::exception&) {
+            return detail::internal_error(request, "Completion provider failed");
+        }
         constexpr std::size_t kMax = 100;  // MCP limit per response
         const auto total = values.size();
         if (values.size() > kMax) values.resize(kMax);

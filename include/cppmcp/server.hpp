@@ -151,6 +151,8 @@ private:
 
 using ContextToolHandler =
     std::function<nlohmann::json(const nlohmann::json&, const nlohmann::json&, ToolContext&)>;
+using RequestHandler =
+    std::function<core::Message(const core::Request&, ToolContext&)>;
 
 struct ToolResult {
     nlohmann::json payload;
@@ -201,6 +203,7 @@ public:
     void add_tool(ToolDefinition tool, ContextToolHandler context_handler);
     void add_tool(ToolBuilder tool);
     void add_tool(ToolBuilder tool, ContextToolHandler context_handler);
+    void add_request_handler(std::string method, RequestHandler handler);
     void set_validate_output(bool enabled) noexcept;
     bool has_tool(const std::string& name) const;
     std::vector<ToolDefinition> tools() const;
@@ -226,6 +229,9 @@ private:
     };
 
     CompiledToolSchemas compile_tool_schemas(const ToolDefinition& tool) const;
+    core::Message handle_registered_request(const core::Request& request,
+                                            ToolContext* context,
+                                            const RequestHandler& handler);
     std::string request_protocol_version(const core::Json& params) const;
     std::string request_method_name(const core::Request& request) const;
 
@@ -235,6 +241,7 @@ private:
     std::map<std::string, ContextToolHandler> context_handlers_;
     std::map<std::string, std::vector<HeaderParamDefinition>> header_params_;
     std::map<std::string, CompiledToolSchemas> compiled_tool_schemas_;
+    std::map<std::string, RequestHandler> request_handlers_;
     std::shared_ptr<core::ISchemaValidator> schema_validator_;
     core::SchemaValidationLimits schema_limits_;
     std::atomic_bool validate_output_{true};

@@ -93,6 +93,9 @@ private:
             }
             out.params["_meta"] = std::move(meta);
         }
+        for (const auto* key : {"requestState", "inputResponses"}) {
+            if (request->params.contains(key)) out.params[key] = request->params[key];
+        }
         return out;
     }
 
@@ -107,9 +110,11 @@ public:
 
     // Send any MCP request and return its `result`. Throws on JSON-RPC errors / timeouts.
     Json request(const std::string& method, Json params = Json::object(),
-                 std::chrono::milliseconds timeout = std::chrono::seconds(15)) {
+                 std::chrono::milliseconds timeout = std::chrono::seconds(15),
+                 std::function<Json(const std::string&, const Json&)> on_elicit = {}) {
         Client::CallToolOptions options;
         options.timeout = timeout;
+        options.on_elicit = std::move(on_elicit);
         return client_.call_tool(RawRequestTransport::kSentinel,
                                  {{"method", method}, {"params", std::move(params)}},
                                  std::move(options));

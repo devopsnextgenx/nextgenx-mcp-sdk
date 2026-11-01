@@ -63,7 +63,7 @@ Json parse_object(const char* flag, const char* text) {
 int main(int argc, char** argv) {
     try {
         cppmcp::HttpClientOptions options;
-        std::string token, log_level, elicit_action, rpc_method, task_tool, subscribe_uri;
+        std::string token, log_level, elicit_action, rpc_method, request_method, task_tool, subscribe_uri;
         std::optional<std::string> requested_call;
         Json call_args = Json::object(), elicit_content = Json::object(), rpc_params = Json::object();
         bool progress = false, listen = false, demo = false;
@@ -74,7 +74,8 @@ int main(int argc, char** argv) {
                 argument == "--url" || argument == "--mode" || argument == "--cacert" || argument == "--token" ||
                 argument == "--duration-ms" || argument == "--call" || argument == "--args" ||
                 argument == "--log-level" || argument == "--elicit" || argument == "--elicit-content" ||
-                argument == "--rpc" || argument == "--rpc-params" || argument == "--task" ||
+                argument == "--rpc" || argument == "--rpc-params" || argument == "--request" ||
+                argument == "--params" || argument == "--task" ||
                 argument == "--subscribe";
             if (takes_value && i + 1 >= argc) throw std::invalid_argument("missing value for " + std::string(argument));
             if (argument == "--url") options.url = argv[++i];
@@ -96,6 +97,8 @@ int main(int argc, char** argv) {
             else if (argument == "--demo") demo = true;
             else if (argument == "--rpc") rpc_method = argv[++i];
             else if (argument == "--rpc-params") rpc_params = parse_object("--rpc-params", argv[++i]);
+            else if (argument == "--request") request_method = argv[++i];
+            else if (argument == "--params") rpc_params = parse_object("--params", argv[++i]);
             else if (argument == "--task") task_tool = argv[++i];
             else if (argument == "--subscribe") subscribe_uri = argv[++i];
             else throw std::invalid_argument("unknown option: " + std::string(argument));
@@ -104,7 +107,8 @@ int main(int argc, char** argv) {
         if (!token.empty()) options.auth_provider = std::make_shared<cppmcp::StaticBearerProvider>(token);
         if (!elicit_action.empty() || demo) options.client_capabilities["elicitation"] = {{"form", Json::object()}};
 
-        const bool use_ext = demo || !rpc_method.empty() || !task_tool.empty() || !subscribe_uri.empty();
+        const bool use_ext = demo || !rpc_method.empty() || !request_method.empty() ||
+                             !task_tool.empty() || !subscribe_uri.empty();
 
         cppmcp::Client client;
         std::shared_ptr<cppmcp::transport::HttpClientTransport> http;
@@ -173,6 +177,24 @@ int main(int argc, char** argv) {
             }
             if (!rpc_method.empty()) {
                 cppmcp::examples::step("RPC " + rpc_method, [&] { return features.request(rpc_method, rpc_params); });
+            }
+            if (!request_method.empty()) {
+                std::function<Json(const std::string&, const Json&)> callback;
+                if (!elicit_action.empty()) {
+                    callback = [&](const std::string&, const Json& request) {
+                        std::cout << "ELICIT "
+                                  << request.value("params", Json::object())
+                                         .value("message", std::string{})
+                                  << '\n';
+                        Json response = {{"action", elicit_action}};
+                        if (elicit_action == "accept") response["content"] = elicit_content;
+                        return response;
+                    };
+                }
+                const auto result = features.request(request_method, rpc_params,
+                                                     std::chrono::seconds(30),
+                                                     std::move(callback));
+                std::cout << "RESULT " << result.dump() << '\n';
             }
             if (!task_tool.empty()) {
                 try {

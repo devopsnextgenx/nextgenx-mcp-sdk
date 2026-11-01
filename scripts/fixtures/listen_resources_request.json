@@ -1,0 +1,21 @@
+{
+  "jsonrpc": "2.0",
+  "id": "phase5-listen",
+  "method": "subscriptions/listen",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "verify-phase5",
+        "version": "0.1.0"
+      },
+      "io.modelcontextprotocol/clientCapabilities": {}
+    },
+    "notifications": {
+      "toolsListChanged": true,
+      "promptsListChanged": true,
+      "resourcesListChanged": true,
+      "resourceSubscriptions": ["demo://counter"]
+    }
+  }
+}

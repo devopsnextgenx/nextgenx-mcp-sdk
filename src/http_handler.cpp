@@ -588,7 +588,8 @@ bool has_client_capabilities(const Request& request) {
 
 bool is_supported_method(std::string_view method) {
     return method == "server/discover" || method == "tools/list" || method == "tools/call" ||
-           method == "subscriptions/listen";
+           method == "subscriptions/listen" || method == "prompts/get" ||
+           method == "resources/read";
 }
 
 void send_response(IHttpExchange& exchange, const HttpHandlerOptions& options,

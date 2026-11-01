@@ -111,6 +111,34 @@ inline void add_demo_features(FeatureRegistry& registry) {
                                                    {"content", {{"type", "text"},
                                                                 {"text", "Hello!"}}}}})}};
         },
+        .context_render = [](const Json&, ToolContext& context) {
+            if (!context.input_responses().contains("name")) {
+                return Json{{"resultType", "input_required"},
+                            {"inputRequests",
+                             {{"name",
+                               {{"method", "elicitation/create"},
+                                {"params",
+                                 {{"mode", "form"},
+                                  {"message", "What is your name?"},
+                                  {"requestedSchema",
+                                   {{"type", "object"},
+                                    {"properties", {{"name", {{"type", "string"}}}}},
+                                    {"required", {"name"}},
+                                    {"additionalProperties", false}}}}}}}}},
+                            {"privateState", Json::object()}};
+            }
+            const auto response = context.input_responses().value("name", Json::object());
+            const auto name = response.value("action", std::string{}) == "accept"
+                                  ? response.value("content", Json::object())
+                                        .value("name", std::string{})
+                                  : std::string{};
+            const auto greeting = name.empty() ? std::string("Hello!")
+                                                : "Hello " + name + "!";
+            return Json{{"description", "A greeting"},
+                        {"messages", Json::array({{{"role", "user"},
+                                                   {"content", {{"type", "text"},
+                                                                {"text", greeting}}}}})}};
+        },
     });
 
     registry.add_prompt({
@@ -140,6 +168,13 @@ inline void add_demo_features(FeatureRegistry& registry) {
     registry.add_prompt_completion("summarize", "style", [](const std::string& typed, const Json&) {
         return prefix_filter({"brief", "detailed", "bullets"}, typed);
     });
+    registry.add_prompt_completion(
+        "code_review", "framework", [](const std::string& typed, const Json& context) {
+            const auto language = context.value("language", std::string{});
+            if (language == "python") return prefix_filter({"django", "flask"}, typed);
+            if (language == "rust") return prefix_filter({"axum", "actix"}, typed);
+            return std::vector<std::string>{};
+        });
     registry.add_prompt_completion("city_briefing", "city", [](const std::string& typed, const Json&) {
         std::vector<std::string> names;
         for (const auto& c : demo::kCities) names.emplace_back(c.name);
@@ -176,6 +211,38 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .description = "A counter resource.",
         .mime_type = "text/plain",
         .read = [] { return ResourceContent{std::string("counter=0"), std::nullopt, std::nullopt}; },
+    });
+    registry.add_resource({
+        .uri = "demo://secret/needs_confirm",
+        .name = "confirmed_secret",
+        .title = "Confirmed secret",
+        .description = "Requires explicit confirmation before returning the value.",
+        .mime_type = "text/plain",
+        .context_read = [](const std::string& uri, ToolContext& context) {
+            if (!context.input_responses().contains("confirm")) {
+                return Json{{"resultType", "input_required"},
+                            {"inputRequests",
+                             {{"confirm",
+                               {{"method", "elicitation/create"},
+                                {"params",
+                                 {{"mode", "form"},
+                                  {"message", "Confirm access to the secret resource."},
+                                  {"requestedSchema",
+                                   {{"type", "object"},
+                                    {"properties", {{"confirm", {{"type", "boolean"}}}}},
+                                    {"required", {"confirm"}},
+                                    {"additionalProperties", false}}}}}}}}},
+                            {"privateState", Json::object()}};
+            }
+            const auto response = context.input_responses().value("confirm", Json::object());
+            const bool approved = response.value("action", std::string{}) == "accept" &&
+                                  response.value("content", Json::object())
+                                      .value("confirm", false);
+            return Json{{"contents",
+                         Json::array({{{"uri", uri},
+                                       {"mimeType", "text/plain"},
+                                       {"text", approved ? "secret-value" : "access denied"}}})}};
+        },
     });
     registry.add_resource({
         .uri = "demo://config",
@@ -240,6 +307,11 @@ inline void add_demo_features(FeatureRegistry& registry) {
             return ResourceContent{"Profile for user " + id, std::nullopt, std::nullopt};
         },
     });
+    registry.add_resource_completion(
+        "demo://users/{id}/profile{?format}", "id",
+        [](const std::string& typed, const Json&) {
+            return prefix_filter({"1", "2", "42", "420", "7"}, typed);
+        });
     registry.add_resource_template({
         .uri_template = "demo://notes/{id}",
         .name = "note",

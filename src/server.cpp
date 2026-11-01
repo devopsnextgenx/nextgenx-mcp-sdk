@@ -486,6 +486,14 @@ void Server::add_tool(ToolBuilder tool, ContextToolHandler context_handler) {
     tools_[name] = std::move(tool.tool_);
 }
 
+void Server::add_request_handler(std::string method, RequestHandler handler) {
+    if (method.empty() || !handler) {
+        throw std::invalid_argument("request handler requires a method and callback");
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    request_handlers_[std::move(method)] = std::move(handler);
+}
+
 void Server::set_validate_output(bool enabled) noexcept {
     validate_output_.store(enabled, std::memory_order_relaxed);
 }
@@ -615,6 +623,16 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             result["resultType"] = "complete";
         }
         return core::ResultResponse{request.id, std::move(result)};
+    }
+
+    RequestHandler request_handler;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = request_handlers_.find(method);
+        if (it != request_handlers_.end()) request_handler = it->second;
+    }
+    if (request_handler) {
+        return handle_registered_request(request, context, request_handler);
     }
 
     if (method == "tools/call") {
@@ -895,6 +913,170 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     return core::ErrorResponse{request.id,
                               core::protocol_error(core::ErrorCode::method_not_found,
                                                    "Unknown method")};
+}
+
+core::Message Server::handle_registered_request(const core::Request& request,
+                                                ToolContext* context,
+                                                const RequestHandler& handler) {
+    ToolContext fallback({}, {}, request.params);
+    auto& operation_context = context == nullptr ? fallback : *context;
+    const auto version = request_protocol_version(request.params);
+    auto capabilities = nlohmann::json::object();
+    if (!version.empty()) {
+        const auto meta = core::meta::get_meta(request.params);
+        const auto found = meta.find("io.modelcontextprotocol/clientCapabilities");
+        if (found != meta.end() && found->is_object()) capabilities = *found;
+    } else {
+        capabilities = operation_context.client_capabilities();
+        if (capabilities.empty()) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            capabilities = legacy_client_capabilities_;
+        }
+    }
+    operation_context.set_client_capabilities(capabilities);
+
+    std::string target;
+    if (request.method == "prompts/get") {
+        target = request.params.value("name", std::string{});
+    } else if (request.method == "resources/read") {
+        target = request.params.value("uri", std::string{});
+    }
+    if (target.empty()) {
+        return core::ErrorResponse{request.id,
+            core::protocol_error(core::ErrorCode::invalid_params,
+                                 "Operation target is required")};
+    }
+
+    core::RequestStateBinding binding;
+    binding.method = request.method;
+    binding.name = target;
+    binding.params = request.params;
+    binding.subject = subject_provider_ ? subject_provider_->subject(request)
+                                        : operation_context.request_subject();
+    const auto codec = request_state_codec_.load();
+    nlohmann::json responses = nlohmann::json::object();
+    std::size_t round = 0;
+    try {
+        if (request.params.contains("inputResponses")) {
+            responses = request.params.at("inputResponses");
+            if (!responses.is_object()) throw std::invalid_argument("inputResponses must be an object");
+        }
+        if (request.params.contains("requestState")) {
+            const auto claims = codec->verify(
+                request.params.at("requestState").get<std::string>(), binding);
+            round = claims.round;
+            const auto pending = claims.private_payload.at("inputRequests");
+            for (auto response = responses.begin(); response != responses.end(); ++response) {
+                if (!pending.contains(response.key()) || !response.value().is_object() ||
+                    !response.value().contains("action") ||
+                    !response.value()["action"].is_string()) {
+                    throw std::invalid_argument("Invalid elicitation response");
+                }
+                const auto action = response.value()["action"].get<std::string>();
+                if (action != "accept" && action != "decline" && action != "cancel") {
+                    throw std::invalid_argument("Invalid elicitation action");
+                }
+                const auto& input_params = pending.at(response.key()).at("params");
+                if (action == "accept" &&
+                    input_params.value("mode", std::string("form")) == "form") {
+                    const auto validator = schema_validator_->compile(
+                        input_params.at("requestedSchema"), schema_limits_);
+                    if (!response.value().contains("content") ||
+                        validator->validate(response.value().at("content"))) {
+                        throw std::invalid_argument("Invalid elicitation response content");
+                    }
+                }
+            }
+            operation_context.set_state(claims.private_payload.at("state"));
+        } else if (!responses.empty()) {
+            throw std::invalid_argument("inputResponses requires requestState");
+        }
+        operation_context.set_request_state(
+            request.params.value("requestState", std::string{}));
+        operation_context.set_input_responses(std::move(responses));
+    } catch (const std::exception&) {
+        return core::ErrorResponse{request.id,
+            core::protocol_error(core::ErrorCode::invalid_params,
+                                 "Invalid operation continuation")};
+    }
+
+    core::Message handled;
+    try {
+        handled = handler(request, operation_context);
+    } catch (const std::exception&) {
+        return core::ErrorResponse{request.id,
+            core::protocol_error(core::ErrorCode::internal_error,
+                                 "Request handler failed")};
+    }
+    if (const auto* error = std::get_if<core::ErrorResponse>(&handled)) return *error;
+    const auto* completed = std::get_if<core::ResultResponse>(&handled);
+    if (completed == nullptr || !completed->result.is_object()) {
+        return core::ErrorResponse{request.id,
+            core::protocol_error(core::ErrorCode::internal_error,
+                                 "Request handler returned an invalid result")};
+    }
+    auto result = completed->result;
+
+    if (result.value("resultType", std::string{}) == "input_required") {
+        try {
+            const auto requests = result.value("inputRequests", nlohmann::json::object());
+            if (!requests.is_object() || requests.empty()) {
+                throw std::invalid_argument("inputRequests must be a non-empty object");
+            }
+            const auto elicitation = capabilities.value("elicitation", nlohmann::json::object());
+            for (auto input = requests.begin(); input != requests.end(); ++input) {
+                if (input.key().empty() || !input.value().is_object() ||
+                    input.value().value("method", std::string{}) != "elicitation/create" ||
+                    !input.value().contains("params") || !input.value()["params"].is_object()) {
+                    throw std::invalid_argument("Unsupported input request");
+                }
+                const auto& input_params = input.value()["params"];
+                const auto mode = input_params.value("mode", std::string("form"));
+                if (mode != "form" && mode != "url") {
+                    throw std::invalid_argument("Invalid elicitation mode");
+                }
+                if (!elicitation.is_object() || !elicitation.contains(mode) ||
+                    !elicitation[mode].is_object()) {
+                    return core::ErrorResponse{request.id,
+                        core::protocol_error(
+                            core::ErrorCode::missing_required_client_capability,
+                            "Client does not support the required elicitation mode",
+                            {{"requiredCapabilities", {{"elicitation", {{mode, nlohmann::json::object()}}}}}})};
+                }
+                if (mode == "form") {
+                    core::validate_elicitation_form_schema(input_params.at("requestedSchema"));
+                    (void)schema_validator_->compile(input_params.at("requestedSchema"),
+                                                     schema_limits_);
+                } else if (!input_params.contains("url") ||
+                           !input_params["url"].is_string() ||
+                           !input_params["url"].get<std::string>().starts_with("https://")) {
+                    throw std::invalid_argument("URL elicitation requires HTTPS");
+                }
+                binding.input_request_ids.push_back(input.key());
+            }
+            if (round >= max_mrtr_rounds_) {
+                return core::ErrorResponse{request.id,
+                    core::protocol_error(core::ErrorCode::invalid_params,
+                                         "TooManyRounds: continuation limit reached")};
+            }
+            binding.round = round + 1;
+            binding.private_payload = {
+                {"state", result.value("privateState", operation_context.state())},
+                {"inputRequests", requests}};
+            result.erase("privateState");
+            result["requestState"] = codec->issue(binding);
+        } catch (const std::exception&) {
+            return core::ErrorResponse{request.id,
+                core::protocol_error(core::ErrorCode::internal_error,
+                                     "Invalid input-required request result")};
+        }
+    } else if (!version.empty()) {
+        result["resultType"] = "complete";
+        result["_meta"] = {{"io.modelcontextprotocol/serverInfo",
+                            {{"name", info_.name}, {"title", info_.title},
+                             {"version", info_.version}}}};
+    }
+    return core::ResultResponse{request.id, std::move(result)};
 }
 
 core::Message Server::handle_message(const core::Message& message, ToolContext* context) {
