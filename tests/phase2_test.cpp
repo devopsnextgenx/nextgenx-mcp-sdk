@@ -15,11 +15,14 @@ namespace {
 
 void attach_server(const std::shared_ptr<cppmcp::core::MemoryTransport>& transport,
                    cppmcp::Server& server) {
-    transport->on_message([&server, transport](const cppmcp::core::Message& message) {
+    const std::weak_ptr<cppmcp::core::MemoryTransport> weak_transport = transport;
+    transport->on_message([&server, weak_transport](const cppmcp::core::Message& message) {
         const auto response = server.handle_message(message);
         if (std::holds_alternative<cppmcp::core::ResultResponse>(response) ||
             std::holds_alternative<cppmcp::core::ErrorResponse>(response)) {
-            transport->send(response);
+            if (const auto peer = weak_transport.lock()) {
+                peer->send(response);
+            }
         }
     });
 }
@@ -215,6 +218,7 @@ void test_client_api(std::string_view selected) {
         client.connect_http(make_http_client_options());
         server.notify_resource_updated("demo://static");
         CPPMCP_CHECK(wait_for_update(2));
+        client.close();
     }
 
     client.close();

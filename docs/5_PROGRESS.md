@@ -2,41 +2,51 @@
 
 ## Status
 
-Step 0 and Slices 1–3 are committed and their acceptance gates passed:
-`4512727`, `7f9996a`, `18d9f9d`, and `6ab01c8`. Slice 4 is committed as
-`632f76e`; its full acceptance gate passes. Slice 4 added the required named
-Phase 5 CTest coverage, four libFuzzer targets, and the requested
-protocol/security/quickstart documentation.
+Phase 5B slice 1 and 2 are implemented and committed as `b53f58d` and
+`92ca27b`. Slice 3 is complete. The final Phase 5B gate passed; Phase 6 was
+not started as part of this work.
 
-The gates pass, but the wider Phase 5 request has documented gaps: the example
-URI-template matcher is not full RFC 6570, pagination uses offsets rather than
-stable registration-sequence cursors, registries remain example adapters
-rather than public `Server` builders, the C++ client has no typed
-prompt/resource/completion methods beyond resource subscription controls, and
-Windows file reads lack the POSIX no-follow/TOCTOU guarantee. Do not treat the
-gate pass as full spec conformance.
+The documented Phase 5 SDK gaps closed in these slices are: public server
+prompt/resource/template builders, RFC 6570 templates, stable registration
+cursors, typed tool results without an in-band sentinel, an installed-package
+consumer, prompt/resource/completion client calls, client caching and HTTP
+subscription re-establishment, a public file provider, linear-time schema
+patterns through pinned RE2, protected request-state key file/environment
+configuration, and reproducible conformance fixtures.
 
-## Latest verification
+Explicitly accepted limitations:
 
-```text
-CTest discovery: 213 tests
-Focused Phase 5 tests: 63/63 passed
-Full CTest suite: 210 passed, 0 failed, 3 official-schema categories skipped by policy
-Official conformance CLI (2025-11-25 legacy): 11 checks passed, 20 failed
-Official conformance CLI (2026-07-28): unsupported by published CLI
-Final Phase 5 gate: 114 passed, 0 failed, 0 warnings
-ASan/UBSan and TSan: tests passed with zero findings
-```
+- The published MCP conformance CLI has no `2026-07-28` profile. The recorded
+  official results therefore cover selected `2025-11-25` compatibility
+  scenarios and do not claim full modern-profile conformance.
+- Typed `InputRequired` continuation handling is complete for tool calls.
+  Prompt/resource handlers can return the typed outcome, but automatic
+  prompt/resource continuation retries are not claimed by this phase.
+- Windows file reads fail closed unless `allow_unsafe_windows_sandbox` is
+  explicitly enabled; that compatibility opt-in does not provide the POSIX
+  handle-relative symlink guarantee.
 
-The first Slice 4 acceptance-gate attempt was a pre-change baseline and failed
-only the then-missing Slice 4 test names/count, `docs/5_EVIDENCE.md`, and the
-file-sandbox security section. Its tail was:
+## Final verification
 
 ```text
-RESULT: 92 passed, 15 failed, 0 warnings
+CTest discovery: 342 tests
+Full CTest suite: 100% passed, 0 failed; 3 external-schema categories skipped by policy
+Phase 5B slice 1 gate: 47 passed, 0 failed, 0 warnings
+Phase 5B slice 2 gate: 73 passed, 0 failed, 0 warnings
+Phase 5B slice 3 full gate: 90 passed, 0 failed, 0 warnings
+RE2 schema tests and typed client tests: passed
+Installed-package consumer: passed, including typed client calls over MemoryTransport
+12 Clang/libFuzzer targets: built; each completed 100 smoke runs without a crash
+Official 2025-11-25 conformance scenarios: six targeted scenarios passed
+AddressSanitizer/UndefinedBehaviorSanitizer: full suite passed, zero findings
+ThreadSanitizer: full suite passed, zero findings
+Inspector interoperability: templates/list advertises operator templates
 ```
+
+The combined gate's targeted `resources-list` conformance scenario also passed
+with 0 failures and 0 warnings. Full evidence is recorded in
+[`5B_EVIDENCE.md`](./5B_EVIDENCE.md).
 
 ## Next action
 
-Close or explicitly accept the documented Phase 5 gaps before moving to Phase 6
-OAuth authentication work.
+Phase 5B is complete. Phase 6 remains outside the scope of this execution.

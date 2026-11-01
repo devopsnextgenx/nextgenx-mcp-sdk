@@ -589,7 +589,7 @@ private:
 
     std::string root_;
     std::size_t max_bytes_;
-    bool allow_unsafe_windows_sandbox_;
+    [[maybe_unused]] bool allow_unsafe_windows_sandbox_;
 };
 
 // ---------------------------------------------------------------------------

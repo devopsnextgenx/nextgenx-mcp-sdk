@@ -162,12 +162,16 @@ void exercise_typed_client() {
 
     auto [client_transport, server_transport] =
         cppmcp::core::make_memory_transport_pair();
-    server_transport->on_message([&server, server_transport](
+    const std::weak_ptr<cppmcp::core::MemoryTransport> weak_server_transport =
+        server_transport;
+    server_transport->on_message([&server, weak_server_transport](
                                      const cppmcp::core::Message& message) {
         const auto response = server.handle_message(message);
         if (std::holds_alternative<cppmcp::core::ResultResponse>(response) ||
             std::holds_alternative<cppmcp::core::ErrorResponse>(response)) {
-            server_transport->send(response);
+            if (const auto transport = weak_server_transport.lock()) {
+                transport->send(response);
+            }
         }
     });
     cppmcp::Client client;

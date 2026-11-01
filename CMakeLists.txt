@@ -267,6 +267,9 @@ if(CPPMCP_BUILD_FUZZERS)
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
     target_link_libraries(cppmcp_fuzz_pagination_cursor PRIVATE cppmcp::server)
 
+    cppmcp_add_fuzzer(cppmcp_fuzz_client_cache fuzz/client_cache_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_client_cache PRIVATE cppmcp::client)
+
     cppmcp_add_fuzzer(cppmcp_fuzz_file_sandbox fuzz/file_sandbox_fuzz.cpp)
     target_include_directories(cppmcp_fuzz_file_sandbox PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
@@ -328,6 +331,10 @@ install(FILES
     ${CMAKE_CURRENT_BINARY_DIR}/cppmcpConfig.cmake
     ${CMAKE_CURRENT_BINARY_DIR}/cppmcpConfigVersion.cmake
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/cppmcp
+)
+install(FILES "${re2_SOURCE_DIR}/LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/cppmcp"
+    RENAME RE2-LICENSE
 )
 
 # ---------------------------------------------------------------------------
@@ -505,6 +512,30 @@ if(CPPMCP_BUILD_TESTS)
             uri_template_vector_46 uri_template_vector_47 uri_template_vector_48)
         add_test(NAME cppmcp_phase5_${test_name}_test
             COMMAND cppmcp_core_tests phase5_${test_name})
+    endforeach()
+    set(uri_template_official_index 0)
+    foreach(vector_file IN ITEMS spec-examples.json extended-tests.json)
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/uritemplate-test/${vector_file}"
+            uri_template_json)
+        string(JSON suite_count LENGTH "${uri_template_json}")
+        if(suite_count GREATER 0)
+            math(EXPR suite_last "${suite_count} - 1")
+            foreach(suite_index RANGE 0 ${suite_last})
+                string(JSON suite_name MEMBER "${uri_template_json}" ${suite_index})
+                string(JSON vector_count LENGTH "${uri_template_json}" "${suite_name}" testcases)
+                if(vector_count GREATER 0)
+                    math(EXPR vector_last "${vector_count} - 1")
+                    foreach(vector_index RANGE 0 ${vector_last})
+                        add_test(
+                            NAME cppmcp_phase5_uri_template_official_vector_${uri_template_official_index}_test
+                            COMMAND cppmcp_core_tests
+                                phase5_uri_template_official_${uri_template_official_index})
+                        math(EXPR uri_template_official_index
+                            "${uri_template_official_index} + 1")
+                    endforeach()
+                endif()
+            endforeach()
+        endif()
     endforeach()
     add_test(NAME api_consumer COMMAND bash
         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_install.sh" "${CMAKE_BINARY_DIR}")

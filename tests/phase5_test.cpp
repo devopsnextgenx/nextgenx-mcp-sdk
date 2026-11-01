@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <charconv>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -59,10 +60,54 @@ void test_uri_template_vector(unsigned index) {
     CPPMCP_CHECK(match && match->at("id") == value);
 }
 
+void test_official_uri_template_vector(unsigned index) {
+    using OrderedJson = nlohmann::ordered_json;
+    std::size_t current = 0;
+    for (const auto* filename : {"spec-examples.json", "extended-tests.json"}) {
+        std::ifstream input(std::filesystem::path(CPPMCP_URI_TEMPLATE_TEST_DATA) / filename);
+        const auto suites = OrderedJson::parse(input);
+        for (auto suite = suites.begin(); suite != suites.end(); ++suite) {
+            const auto& variables = suite.value().at("variables");
+            for (const auto& test : suite.value().at("testcases")) {
+                if (current++ != index) continue;
+                try {
+                    const auto actual =
+                        cppmcp::core::UriTemplate::parse(test[0].get<std::string>())
+                            .expand(variables);
+                    const auto& expected = test[1];
+                    const bool found = expected.is_array()
+                        ? std::any_of(expected.begin(), expected.end(),
+                                      [&](const auto& option) { return option == actual; })
+                        : expected == actual;
+                    CPPMCP_CHECK(found);
+                } catch (const std::exception& error) {
+                    std::cerr << filename << " official vector " << index
+                              << " threw: " << error.what() << '\n';
+                    CPPMCP_CHECK(false);
+                }
+                return;
+            }
+        }
+    }
+    CPPMCP_CHECK(false);
+}
+
 }  // namespace
 
 void test_phase5_case(std::string_view name) {
     using namespace cppmcp::examples;
+
+    if (name.starts_with("uri_template_official_")) {
+        const auto suffix = name.substr(std::string_view("uri_template_official_").size());
+        unsigned index = 0;
+        const auto parsed =
+            std::from_chars(suffix.data(), suffix.data() + suffix.size(), index);
+        CPPMCP_CHECK(parsed.ec == std::errc{} && parsed.ptr == suffix.data() + suffix.size());
+        if (parsed.ec == std::errc{} && parsed.ptr == suffix.data() + suffix.size()) {
+            test_official_uri_template_vector(index);
+        }
+        return;
+    }
 
     if (name.starts_with("uri_template_vector_")) {
         const auto suffix = name.substr(std::string_view("uri_template_vector_").size());
@@ -170,15 +215,27 @@ void test_phase5_case(std::string_view name) {
     }
     if (name == "template_roundtrip") {
         const std::vector<std::string> strings{
-            "", "plain", "a/b", "reserved ?#[]@!$&'()*+,;=", "%2e", "snowman \xE2\x98\x83"};
+            "", "plain", "a/b", "reserved ?#[]@!$&'()*+,;=", "snowman \xE2\x98\x83"};
         for (const auto& value : strings) {
             for (const auto& source : {"demo://roundtrip/{v}", "demo://roundtrip/{+v}"}) {
                 const auto uri_template = cppmcp::core::UriTemplate::parse(source);
                 const Json vars{{"v", value}};
-                const auto matched = uri_template.match(uri_template.expand(vars));
+                const auto expanded = uri_template.expand(vars);
+                const auto matched = uri_template.match(expanded);
                 CPPMCP_CHECK(matched && matched->at("v") == value);
             }
         }
+        const Json percent_vars{{"v", "%2e"}};
+        const auto simple_template =
+            cppmcp::core::UriTemplate::parse("demo://roundtrip/{v}");
+        const auto simple_match =
+            simple_template.match(simple_template.expand(percent_vars));
+        CPPMCP_CHECK(simple_match && simple_match->at("v") == "%2e");
+        const auto reserved_template =
+            cppmcp::core::UriTemplate::parse("demo://roundtrip/{+v}");
+        const auto reserved_match =
+            reserved_template.match(reserved_template.expand(percent_vars));
+        CPPMCP_CHECK(reserved_match && reserved_match->at("v") == ".");
         const auto path_template = cppmcp::core::UriTemplate::parse("demo://roundtrip{/parts*}");
         const Json path_vars{{"parts", Json::array({"a", "b/c", "snowman \xE2\x98\x83"})}};
         const auto path_match = path_template.match(path_template.expand(path_vars));

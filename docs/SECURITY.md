@@ -68,6 +68,15 @@ one-time execution is required. Recheck authorization on every retry.
 Applications may inject their own `IRequestStateCodec`; they must preserve
 authentication, expiry, binding and resource limits themselves.
 
+## File resources
+
+The public file-resource provider opens paths relative to a pinned root
+directory and rejects symlinks on POSIX. On Windows, file reads fail closed by
+default because the current implementation cannot provide the same
+handle-relative no-follow guarantee. `allow_unsafe_windows_sandbox` is an
+explicit compatibility opt-in and does not provide equivalent confinement;
+do not enable it for untrusted resource paths.
+
 ## User Input
 
 Form elicitation is for non-sensitive values only. Schemas are flat, with
