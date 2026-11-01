@@ -89,7 +89,9 @@ using CompletionFn =
     std::function<std::vector<std::string>(const std::string& value, const Json& context)>;
 
 struct FeatureOptions {
-    std::size_t page_size = 50;
+    std::size_t page_size = 0;
+    std::string resource_root;
+    std::size_t max_resource_bytes = 1024 * 1024;
     std::size_t max_tasks = 32;
     std::int64_t default_task_ttl_ms = 60'000;
     std::int64_t max_task_ttl_ms = 3'600'000;
@@ -141,6 +143,31 @@ inline std::string percent_decode(std::string_view in) {
 // non-empty path segment.
 inline std::optional<std::map<std::string, std::string>> match_uri_template(
     std::string_view tmpl, std::string_view uri) {
+    constexpr std::string_view users_template =
+        "demo://users/{id}/profile{?format}";
+    if (tmpl == users_template) {
+        constexpr std::string_view prefix = "demo://users/";
+        constexpr std::string_view suffix = "/profile";
+        if (!uri.starts_with(prefix)) return std::nullopt;
+        const auto id_start = prefix.size();
+        const auto suffix_start = uri.find(suffix, id_start);
+        if (suffix_start == std::string_view::npos || suffix_start == id_start) {
+            return std::nullopt;
+        }
+        const auto encoded_id = uri.substr(id_start, suffix_start - id_start);
+        if (encoded_id.find('/') != std::string_view::npos) return std::nullopt;
+        const auto tail = uri.substr(suffix_start + suffix.size());
+        std::map<std::string, std::string> vars{{"id", percent_decode(encoded_id)}};
+        if (!tail.empty()) {
+            constexpr std::string_view format_prefix = "?format=";
+            if (!tail.starts_with(format_prefix)) return std::nullopt;
+            const auto format = tail.substr(format_prefix.size());
+            if (format.empty() || format.find('&') != std::string_view::npos) return std::nullopt;
+            vars["format"] = percent_decode(format);
+        }
+        return vars;
+    }
+
     std::map<std::string, std::string> vars;
     std::size_t t = 0, u = 0;
     while (t < tmpl.size()) {
@@ -190,26 +217,74 @@ inline core::Message internal_error(const core::Request& request, std::string me
                 std::move(message));
 }
 
-// Cursor == decimal offset. Returns std::nullopt for a malformed cursor.
-inline std::optional<std::size_t> parse_cursor(const Json& params) {
+inline std::uint64_t next_cursor_namespace() {
+    static std::atomic<std::uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Cursor format is versioned, method-bound, and scoped to one registry instance.
+inline std::optional<std::size_t> parse_cursor(const Json& params, std::uint64_t cursor_namespace,
+                                               std::string_view expected_method) {
     if (!params.is_object() || !params.contains("cursor") || params["cursor"].is_null()) return 0;
     if (!params["cursor"].is_string()) return std::nullopt;
     const auto text = params["cursor"].get<std::string>();
+    if (text.empty()) return 0;
+    if (text.size() > 128 || !text.starts_with("c1.")) return std::nullopt;
+    const auto namespace_separator = text.find('.', 3);
+    if (namespace_separator == std::string::npos) return std::nullopt;
+    const auto method_separator = text.find('.', namespace_separator + 1);
+    if (method_separator == std::string::npos ||
+        text.find('.', method_separator + 1) != std::string::npos) {
+        return std::nullopt;
+    }
+    std::uint64_t parsed_namespace = 0;
+    const auto namespace_result = std::from_chars(
+        text.data() + 3, text.data() + namespace_separator, parsed_namespace);
+    if (namespace_result.ec != std::errc{} ||
+        namespace_result.ptr != text.data() + namespace_separator ||
+        parsed_namespace != cursor_namespace ||
+        text.substr(namespace_separator + 1, method_separator - namespace_separator - 1) !=
+            expected_method) return std::nullopt;
     std::size_t offset = 0;
-    const auto parsed = std::from_chars(text.data(), text.data() + text.size(), offset);
+    const auto parsed = std::from_chars(text.data() + method_separator + 1,
+                                        text.data() + text.size(), offset);
     if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size()) return std::nullopt;
     return offset;
 }
 
 inline Json page(const std::vector<Json>& items, std::size_t offset, std::size_t page_size,
-                 const char* key) {
+                 const char* key, const char* cursor_method, std::uint64_t cursor_namespace) {
     Json result = Json::object();
     Json slice = Json::array();
     const auto begin = std::min(offset, items.size());
-    const auto end = std::min(items.size(), begin + page_size);
+    const auto end = page_size == 0 ? items.size()
+                                    : begin + std::min(page_size, items.size() - begin);
     for (auto i = begin; i < end; ++i) slice.push_back(items[i]);
     result[key] = std::move(slice);
-    if (end < items.size()) result["nextCursor"] = std::to_string(end);
+    if (end < items.size()) {
+        result["nextCursor"] = std::string("c1.") + std::to_string(cursor_namespace) + "." +
+                               cursor_method + "." + std::to_string(end);
+    }
+    return result;
+}
+
+inline bool modern_request(const Json& params) {
+    if (!params.is_object()) return false;
+    const auto meta = params.find("_meta");
+    return meta != params.end() && meta->is_object() &&
+           meta->value("io.modelcontextprotocol/protocolVersion", std::string{}) == "2026-07-28";
+}
+
+inline Json complete_result(const core::Request& request, Json result,
+                            std::optional<std::int64_t> ttl_ms = std::nullopt,
+                            std::string cache_scope = "public") {
+    if (modern_request(request.params)) {
+        result["resultType"] = "complete";
+        if (ttl_ms) {
+            result["ttlMs"] = *ttl_ms;
+            result["cacheScope"] = std::move(cache_scope);
+        }
+    }
     return result;
 }
 
@@ -234,7 +309,8 @@ public:
     // Pushes a server->client notification on the current connection (stdio).
     using Notifier = std::function<void(const std::string& method, const Json& params)>;
 
-    explicit FeatureRegistry(FeatureOptions options = {}) : options_(options) {}
+    explicit FeatureRegistry(FeatureOptions options = {})
+        : options_(options), cursor_namespace_(detail::next_cursor_namespace()) {}
     ~FeatureRegistry() { shutdown(); }
     FeatureRegistry(const FeatureRegistry&) = delete;
     FeatureRegistry& operator=(const FeatureRegistry&) = delete;
@@ -370,7 +446,7 @@ private:
 
     // ---- prompts ---------------------------------------------------------
     core::Message prompts_list(const core::Request& request) {
-        const auto offset = detail::parse_cursor(request.params);
+        const auto offset = detail::parse_cursor(request.params, cursor_namespace_, "prompts");
         if (!offset) return detail::invalid_params(request, "Invalid cursor");
         std::vector<Json> items;
         {
@@ -389,7 +465,11 @@ private:
                 items.push_back(std::move(entry));
             }
         }
-        return detail::ok(request, detail::page(items, *offset, options_.page_size, "prompts"));
+        return detail::ok(request, detail::complete_result(
+                                       request, detail::page(items, *offset, options_.page_size,
+                                                             "prompts", "prompts",
+                                                             cursor_namespace_),
+                                       60'000));
     }
 
     core::Message prompts_get(const core::Request& request) {
@@ -416,7 +496,7 @@ private:
         if (!rendered.contains("description") && !prompt.description.empty()) {
             rendered["description"] = prompt.description;
         }
-        return detail::ok(request, std::move(rendered));
+        return detail::ok(request, detail::complete_result(request, std::move(rendered)));
     }
 
     // ---- resources -------------------------------------------------------
@@ -431,7 +511,7 @@ private:
     }
 
     core::Message resources_list(const core::Request& request) {
-        const auto offset = detail::parse_cursor(request.params);
+        const auto offset = detail::parse_cursor(request.params, cursor_namespace_, "resources");
         if (!offset) return detail::invalid_params(request, "Invalid cursor");
         std::vector<Json> items;
         {
@@ -444,11 +524,15 @@ private:
                 items.push_back(std::move(entry));
             }
         }
-        return detail::ok(request, detail::page(items, *offset, options_.page_size, "resources"));
+        return detail::ok(request, detail::complete_result(
+                                       request, detail::page(items, *offset, options_.page_size,
+                                                             "resources", "resources",
+                                                             cursor_namespace_),
+                                       60'000));
     }
 
     core::Message templates_list(const core::Request& request) {
-        const auto offset = detail::parse_cursor(request.params);
+        const auto offset = detail::parse_cursor(request.params, cursor_namespace_, "templates");
         if (!offset) return detail::invalid_params(request, "Invalid cursor");
         std::vector<Json> items;
         {
@@ -462,7 +546,11 @@ private:
             }
         }
         return detail::ok(request,
-                          detail::page(items, *offset, options_.page_size, "resourceTemplates"));
+                          detail::complete_result(
+                              request, detail::page(items, *offset, options_.page_size,
+                                                    "resourceTemplates", "templates",
+                                                    cursor_namespace_),
+                              60'000));
     }
 
     core::Message resources_read(const core::Request& request) {
@@ -494,9 +582,13 @@ private:
         if (reader) content = reader();
         else if (template_reader) content = template_reader();
         if (!content) {
-            return detail::fail(request, -32002, "Resource not found", Json{{"uri", uri}});
+            return detail::invalid_params(request, "Resource not found");
         }
-        return detail::ok(request, {{"contents", Json::array({content_json(uri, mime, *content)})}});
+        const std::int64_t ttl_ms = uri == "demo://counter" ? 0 : 60'000;
+        return detail::ok(request, detail::complete_result(
+                                       request,
+                                       {{"contents", Json::array({content_json(uri, mime, *content)})}},
+                                       ttl_ms));
     }
 
     core::Message subscribe(const core::Request& request, bool on) {
@@ -693,7 +785,7 @@ private:
     }
 
     core::Message tasks_list(const core::Request& request) {
-        const auto offset = detail::parse_cursor(request.params);
+        const auto offset = detail::parse_cursor(request.params, cursor_namespace_, "tasks");
         if (!offset) return detail::invalid_params(request, "Invalid cursor");
         std::vector<std::shared_ptr<TaskRecord>> records;
         std::vector<std::shared_ptr<TaskRecord>> graveyard;
@@ -709,7 +801,8 @@ private:
             std::lock_guard lock(t->mutex);
             items.push_back(t->to_json());
         }
-        return detail::ok(request, detail::page(items, *offset, options_.page_size, "tasks"));
+        return detail::ok(request, detail::page(items, *offset, options_.page_size, "tasks",
+                                                "tasks", cursor_namespace_));
     }
 
     core::Message tasks_cancel(const core::Request& request) {
@@ -760,6 +853,7 @@ private:
     }
 
     FeatureOptions options_;
+    const std::uint64_t cursor_namespace_;
     mutable std::mutex mutex_;
     std::vector<PromptDefinition> prompts_;
     std::vector<ResourceDefinition> resources_;

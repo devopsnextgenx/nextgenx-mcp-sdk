@@ -66,21 +66,50 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .name = "code_review",
         .title = "Code review",
         .description = "Ask for a focused review of a code snippet.",
-        .arguments = {{"code", "The code to review.", true},
-                      {"language", "Programming language of the snippet.", false},
-                      {"focus", "What to concentrate on.", false}},
+        .arguments = {{"language", "Programming language of the snippet.", true},
+                      {"framework", "Framework used by the snippet.", false}},
         .render = [](const Json& args) {
-            const auto language = args.value("language", std::string("the given language"));
-            const auto focus = args.value("focus", std::string("correctness"));
+            const auto language = args.value("language", std::string{});
+            const auto framework = args.value("framework", std::string{});
             return Json{
                 {"description", "Code review request"},
                 {"messages",
                  Json::array({{{"role", "user"},
                                {"content",
                                 {{"type", "text"},
-                                 {"text", "Please review the following " + language +
-                                              " code, focusing on " + focus + ":\n\n" +
-                                              args.value("code", std::string{})}}}}})}};
+                                 {"text", "Please review the supplied " + language +
+                                              (framework.empty() ? std::string{} :
+                                               " code using " + framework) + "."}}}}})}};
+        },
+    });
+
+    registry.add_prompt({
+        .name = "summarize",
+        .title = "Summarize",
+        .description = "Summarize the supplied text.",
+        .arguments = {{"text", "Text to summarize.", true},
+                      {"style", "Summary style.", false}},
+        .render = [](const Json& args) {
+            const auto style = args.value("style", std::string("brief"));
+            return Json{{"description", "Summary in " + style + " style"},
+                        {"messages", Json::array({{{"role", "user"},
+                                                   {"content", {{"type", "text"},
+                                                                {"text", "Summarize this text (" +
+                                                                             style + "):\n\n" +
+                                                                             args.value("text", std::string{})}}}}})}};
+        },
+    });
+
+    registry.add_prompt({
+        .name = "ask_name",
+        .title = "Ask for a name",
+        .description = "Greet a person by name.",
+        .arguments = {},
+        .render = [](const Json&) {
+            return Json{{"description", "A greeting"},
+                        {"messages", Json::array({{{"role", "user"},
+                                                   {"content", {{"type", "text"},
+                                                                {"text", "Hello!"}}}}})}};
         },
     });
 
@@ -92,32 +121,24 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .render = [](const Json& args) {
             const auto name = args.value("city", std::string{});
             const auto* city = demo::find_city(name);
-            Json messages = Json::array();
-            messages.push_back({{"role", "user"},
-                                {"content",
-                                 {{"type", "text"},
-                                  {"text", "Write a two-sentence travel briefing for " + name + "."}}}});
+            Json messages = Json::array({{{"role", "user"},
+                                          {"content", {{"type", "text"},
+                                                       {"text", "Write a two-sentence travel briefing for " +
+                                                                    name + "."}}}}});
             if (city) {
                 messages.push_back(
                     {{"role", "user"},
-                     {"content",
-                      {{"type", "resource"},
-                       {"resource",
-                        {{"uri", std::string("demo://cities/") + city->name},
-                         {"mimeType", "application/json"},
-                         {"text", demo::city_json(*city).dump()}}}}}});
+                     {"content", {{"type", "resource"},
+                                  {"resource", {{"uri", std::string("demo://cities/") + city->name},
+                                                {"mimeType", "application/json"},
+                                                {"text", demo::city_json(*city).dump()}}}}}});
             }
             return Json{{"description", "Briefing for " + name}, {"messages", std::move(messages)}};
         },
     });
 
-    registry.add_prompt_completion("code_review", "language", [](const std::string& typed, const Json&) {
-        return prefix_filter({"c", "cpp", "csharp", "go", "java", "javascript", "kotlin", "python",
-                              "rust", "swift", "typescript"},
-                             typed);
-    });
-    registry.add_prompt_completion("code_review", "focus", [](const std::string& typed, const Json&) {
-        return prefix_filter({"correctness", "performance", "security", "style", "thread-safety"}, typed);
+    registry.add_prompt_completion("summarize", "style", [](const std::string& typed, const Json&) {
+        return prefix_filter({"brief", "detailed", "bullets"}, typed);
     });
     registry.add_prompt_completion("city_briefing", "city", [](const std::string& typed, const Json&) {
         std::vector<std::string> names;
@@ -137,6 +158,24 @@ inline void add_demo_features(FeatureRegistry& registry) {
                 "# cppmcp demo server\n\nTools, prompts, resources, completions and tasks.\n",
                 std::nullopt, std::nullopt};
         },
+    });
+    registry.add_resource({
+        .uri = "demo://image",
+        .name = "image",
+        .title = "1x1 PNG",
+        .description = "Binary resource returned as a base64 blob.",
+        .mime_type = "image/png",
+        .read = [] {
+            return ResourceContent{std::nullopt, std::string(demo::kPixelPngBase64), std::nullopt};
+        },
+    });
+    registry.add_resource({
+        .uri = "demo://counter",
+        .name = "counter",
+        .title = "Counter",
+        .description = "A counter resource.",
+        .mime_type = "text/plain",
+        .read = [] { return ResourceContent{std::string("counter=0"), std::nullopt, std::nullopt}; },
     });
     registry.add_resource({
         .uri = "demo://config",
@@ -182,6 +221,23 @@ inline void add_demo_features(FeatureRegistry& registry) {
             const auto* city = demo::find_city(vars.at("city"));
             if (!city) return std::nullopt;
             return ResourceContent{demo::city_json(*city).dump(), std::nullopt, std::nullopt};
+        },
+    });
+    registry.add_resource_template({
+        .uri_template = "demo://users/{id}/profile{?format}",
+        .name = "user_profile",
+        .title = "User profile",
+        .description = "A profile for a user ID, optionally formatted as JSON.",
+        .mime_type = "text/plain",
+        .read = [](const std::map<std::string, std::string>& vars)
+            -> std::optional<ResourceContent> {
+            const auto id = vars.at("id");
+            if (const auto format = vars.find("format");
+                format != vars.end() && format->second == "json") {
+                return ResourceContent{Json{{"id", id}, {"name", "User " + id}}.dump(),
+                                       std::nullopt, "application/json"};
+            }
+            return ResourceContent{"Profile for user " + id, std::nullopt, std::nullopt};
         },
     });
     registry.add_resource_template({

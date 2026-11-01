@@ -149,6 +149,18 @@ std::chrono::milliseconds parse_ms(const std::string& value) {
     return std::chrono::milliseconds(static_cast<int>(parsed));
 }
 
+std::size_t parse_size(const std::string& value, const char* option) {
+    if (value.empty() || value.front() == '-') {
+        throw std::invalid_argument(std::string(option) + " must be a non-negative integer");
+    }
+    std::size_t consumed = 0;
+    const auto parsed = std::stoull(value, &consumed);
+    if (consumed != value.size() || parsed > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument(std::string(option) + " is out of range");
+    }
+    return static_cast<std::size_t>(parsed);
+}
+
 std::string parse_request_state_key(const std::string& value) {
     if (value.size() != 64 || !std::all_of(value.begin(), value.end(), [](unsigned char ch) { return std::isxdigit(ch) != 0; })) {
         throw std::invalid_argument("request-state key must contain exactly 64 hexadecimal characters");
@@ -162,6 +174,38 @@ bool parse_validate_output(const std::string& value) {
     throw std::invalid_argument("--validate-output must be on or off");
 }
 
+std::optional<cppmcp::core::RpcError> validate_feature_headers(
+    const cppmcp::core::Request& request, const cppmcp::transport::HttpRequest& http_request) {
+    const auto meta = request.params.is_object() ? request.params.find("_meta")
+                                                  : cppmcp::core::Json::const_iterator{};
+    if (meta == request.params.end() || !meta->is_object() ||
+        meta->value("io.modelcontextprotocol/protocolVersion", std::string{}) != "2026-07-28") {
+        return std::nullopt;
+    }
+
+    auto mismatch = [](std::string header) {
+        return cppmcp::core::RpcError{
+            static_cast<std::int32_t>(cppmcp::core::ErrorCode::header_mismatch),
+            "Mismatched " + header + " header", std::nullopt};
+    };
+    if (cppmcp::examples::header_value(http_request.headers, "Mcp-Method") != request.method) {
+        return mismatch("Mcp-Method");
+    }
+
+    const bool needs_name = request.method == "prompts/get" || request.method == "resources/read";
+    if (!needs_name) return std::nullopt;
+    const char* field = request.method == "prompts/get" ? "name" : "uri";
+    const auto target = request.params.find(field);
+    const auto header = cppmcp::examples::header_value(http_request.headers, "Mcp-Name");
+    std::string decoded;
+    if (target == request.params.end() || !target->is_string() ||
+        !cppmcp::transport::decode_mirrored_header_value(header, decoded) ||
+        decoded != target->get<std::string>()) {
+        return mismatch("Mcp-Name");
+    }
+    return std::nullopt;
+}
+
 std::atomic<bool> g_stop{false};
 extern "C" void on_signal(int) { g_stop = true; }
 
@@ -170,11 +214,17 @@ extern "C" void on_signal(int) { g_stop = true; }
 int main(int argc, char** argv) {
     try {
         cppmcp::transport::HttpOptions options;
+        cppmcp::examples::FeatureOptions feature_options;
         std::string tls_cert, tls_key;
         bool sdk_listener = false;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
             if (argument == "--port" && i + 1 < argc) options.port = parse_port(argv[++i]);
+            else if (argument == "--resource-root" && i + 1 < argc) feature_options.resource_root = argv[++i];
+            else if (argument == "--max-resource-bytes" && i + 1 < argc)
+                feature_options.max_resource_bytes = parse_size(argv[++i], "--max-resource-bytes");
+            else if (argument == "--page-size" && i + 1 < argc)
+                feature_options.page_size = parse_size(argv[++i], "--page-size");
             else if (argument == "--bind" && i + 1 < argc) options.bind_address = argv[++i];
             else if (argument == "--mode" && i + 1 < argc) { options.mode = parse_mode(argv[++i]); options.handler.mode = options.mode; }
             else if (argument == "--ping-interval-ms" && i + 1 < argc) options.handler.ping_interval = parse_ms(argv[++i]);
@@ -207,7 +257,7 @@ int main(int argc, char** argv) {
         cppmcp::examples::add_phase4_tools(server);
         server.set_validate_output(options.validate_output);
 
-        cppmcp::examples::FeatureRegistry registry;
+        cppmcp::examples::FeatureRegistry registry(feature_options);
         cppmcp::examples::add_demo_features(registry);
         registry.set_tool_executor(cppmcp::examples::make_tool_executor(server));
         // HTTP has no connection to push on: resource updates go through the SDK's subscription
@@ -262,6 +312,13 @@ int main(int argc, char** argv) {
                         const auto parsed = cppmcp::core::parse_message(request.body);
                         if (const auto* message = std::get_if<cppmcp::core::Message>(&parsed)) {
                             if (const auto* rpc = std::get_if<cppmcp::core::Request>(message)) {
+                                if (const auto error = validate_feature_headers(*rpc, request)) {
+                                    exchange->respond(
+                                        400, {{"Content-Type", "application/json"}},
+                                        cppmcp::core::serialize_message(
+                                            cppmcp::core::ErrorResponse{rpc->id, *error}));
+                                    return;
+                                }
                                 if (auto handled = registry.try_handle(*rpc)) {
                                     exchange->respond(200, {{"Content-Type", "application/json"}},
                                                       cppmcp::core::serialize_message(*handled));

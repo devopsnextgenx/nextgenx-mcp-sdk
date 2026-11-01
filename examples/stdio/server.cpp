@@ -6,9 +6,13 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <stop_token>
+#include <stdexcept>
+#include <string>
 #include <thread>
 #include <variant>
 
@@ -69,7 +73,34 @@ void add_basic_tools(cppmcp::Server& server) {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    cppmcp::examples::FeatureOptions feature_options;
+    try {
+        for (int i = 1; i < argc; ++i) {
+            const std::string argument = argv[i];
+            if (argument == "--resource-root" && i + 1 < argc) {
+                feature_options.resource_root = argv[++i];
+            } else if (argument == "--max-resource-bytes" && i + 1 < argc) {
+                const std::string value = argv[++i];
+                std::size_t consumed = 0;
+                if (value.empty() || value.front() == '-') {
+                    throw std::invalid_argument(
+                        "--max-resource-bytes must be a non-negative integer");
+                }
+                const auto parsed = std::stoull(value, &consumed);
+                if (consumed != value.size() ||
+                    parsed > std::numeric_limits<std::size_t>::max()) {
+                    throw std::invalid_argument("--max-resource-bytes is out of range");
+                }
+                feature_options.max_resource_bytes = static_cast<std::size_t>(parsed);
+            } else {
+                throw std::invalid_argument("unknown or incomplete option: " + argument);
+            }
+        }
+    } catch (const std::exception& error) {
+        CPPMCP_LOG_ERROR("stdio_server: " << error.what());
+        return EXIT_FAILURE;
+    }
     // Logs go to stderr (or CPPMCP_LOG_FILE); stdout is reserved for protocol frames.
     cppmcp::core::log::configure(cppmcp::core::log::Level::info);
     CPPMCP_LOG_INFO("starting cppmcp-stdio-server");
@@ -78,7 +109,7 @@ int main() {
     add_basic_tools(server);
     cppmcp::examples::add_phase4_tools(server);
 
-    cppmcp::examples::FeatureRegistry registry;
+    cppmcp::examples::FeatureRegistry registry(feature_options);
     cppmcp::examples::add_demo_features(registry);
     registry.set_tool_executor(cppmcp::examples::make_tool_executor(server));
 
