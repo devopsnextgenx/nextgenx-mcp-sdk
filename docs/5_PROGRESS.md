@@ -11,8 +11,10 @@ protocol/security/quickstart documentation.
 The gates pass, but the wider Phase 5 request has documented gaps: the example
 URI-template matcher is not full RFC 6570, pagination uses offsets rather than
 stable registration-sequence cursors, registries remain example adapters
-rather than public `Server` builders, and Windows file reads lack the POSIX
-no-follow/TOCTOU guarantee. Do not treat the gate pass as full spec conformance.
+rather than public `Server` builders, the C++ client has no typed
+prompt/resource/completion methods beyond resource subscription controls, and
+Windows file reads lack the POSIX no-follow/TOCTOU guarantee. Do not treat the
+gate pass as full spec conformance.
 
 ## Latest verification
 
