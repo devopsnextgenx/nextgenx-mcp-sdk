@@ -69,6 +69,12 @@ The 2026 resources page states that URI templates use RFC 6570 and that
 is versioned in the changelog with the other standard MCP request headers;
 for `resources/read` the mirrored name is the request URI. Resource-not-found
 is therefore an error, never a successful empty `contents` result.
+The resources page says: “Resource templates allow servers to expose
+parameterized resources using URI templates” and links RFC 6570. It also says
+`resources/read` “supports caching,” and that servers “MAY respond to
+`resources/read` with an `InputRequiredResult`” using MRTR. The 2025-11-25
+resources page retains the legacy missing-resource code `-32002`; modern
+2026-07-28 follows the changelog's `-32602` change.
 
 The 2026 changelog says: “Replace the HTTP GET endpoint and
 `resources/subscribe`/`resources/unsubscribe` with `subscriptions/listen`.”

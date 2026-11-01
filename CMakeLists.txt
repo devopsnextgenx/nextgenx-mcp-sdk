@@ -77,6 +77,13 @@ set(CPPMCP_SOURCES
     src/connection.cpp
 )
 
+# GCC's optimized libstdc++ regex implementation can trigger a false-positive
+# maybe-uninitialized diagnostic in sanitizer builds. Keep strict warnings and
+# avoid the diagnostic by compiling only this translation unit without O2.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_FLAGS MATCHES "-fsanitize=address")
+    set_source_files_properties(src/json_schema.cpp PROPERTIES COMPILE_OPTIONS "-O0")
+endif()
+
 set(CPPMCP_SERVER_SOURCES
     src/server.cpp
     src/subscription_registry.cpp
@@ -236,6 +243,24 @@ if(CPPMCP_BUILD_FUZZERS)
 
     cppmcp_add_fuzzer(cppmcp_fuzz_request_state fuzz/request_state_fuzz.cpp)
     target_link_libraries(cppmcp_fuzz_request_state PRIVATE cppmcp::core)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_uri_template fuzz/uri_template_fuzz.cpp)
+    target_include_directories(cppmcp_fuzz_uri_template PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+    target_link_libraries(cppmcp_fuzz_uri_template PRIVATE cppmcp::server)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_pagination_cursor fuzz/pagination_cursor_fuzz.cpp)
+    target_include_directories(cppmcp_fuzz_pagination_cursor PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+    target_link_libraries(cppmcp_fuzz_pagination_cursor PRIVATE cppmcp::server)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_file_sandbox fuzz/file_sandbox_fuzz.cpp)
+    target_include_directories(cppmcp_fuzz_file_sandbox PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/common)
+    target_link_libraries(cppmcp_fuzz_file_sandbox PRIVATE cppmcp::server)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_subscription_filter fuzz/subscription_filter_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_subscription_filter PRIVATE cppmcp::transport_http)
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -376,6 +401,7 @@ if(CPPMCP_BUILD_TESTS)
         tests/www_auth_test.cpp
         tests/subscription_registry_test.cpp
         tests/phase3d_test.cpp
+        tests/phase5_test.cpp
     )
     if(CPPMCP_BUILD_STATIC)
         target_link_libraries(cppmcp_core_tests PRIVATE cppmcp::core cppmcp::server cppmcp::client cppmcp::transport_stdio cppmcp::transport_http)
@@ -390,11 +416,15 @@ if(CPPMCP_BUILD_TESTS)
     target_include_directories(cppmcp_core_tests SYSTEM PRIVATE
         ${asio_SOURCE_DIR}/asio/include
     )
+    target_include_directories(cppmcp_core_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    )
     target_compile_definitions(cppmcp_core_tests PRIVATE
         CPPMCP_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schema/2026-07-28/schema.json"
     )
         foreach(test_name IN ITEMS
-            json_rpc versions schema_contract schema_register schema_limits output_schema
+            json_rpc versions schema_contract schema_register tool_name_rule regex_redos_budget
+            schema_limits output_schema
             schema_regex schema_references
             mrtr elicit request_state two_instance
             mrtr_client elicit_url mrtr_generic
@@ -432,5 +462,28 @@ if(CPPMCP_BUILD_TESTS)
             tls_min_version tls_missing_certificate hostname tls_expired_certificate
             tls_truncated_stream www_auth_listener_retry)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
+    endforeach()
+    foreach(test_name IN ITEMS
+            uri_template template_match cursor file_sandbox symlink completion cache_hint
+            registry_churn subscription_limit list_changed mrtr_prompt mrtr_resource
+            mcp_name_uri_encoding
+            uri_template_vector_01 uri_template_vector_02 uri_template_vector_03
+            uri_template_vector_04 uri_template_vector_05 uri_template_vector_06
+            uri_template_vector_07 uri_template_vector_08 uri_template_vector_09
+            uri_template_vector_10 uri_template_vector_11 uri_template_vector_12
+            uri_template_vector_13 uri_template_vector_14 uri_template_vector_15
+            uri_template_vector_16 uri_template_vector_17 uri_template_vector_18
+            uri_template_vector_19 uri_template_vector_20 uri_template_vector_21
+            uri_template_vector_22 uri_template_vector_23 uri_template_vector_24
+            uri_template_vector_25 uri_template_vector_26 uri_template_vector_27
+            uri_template_vector_28 uri_template_vector_29 uri_template_vector_30
+            uri_template_vector_31 uri_template_vector_32 uri_template_vector_33
+            uri_template_vector_34 uri_template_vector_35 uri_template_vector_36
+            uri_template_vector_37 uri_template_vector_38 uri_template_vector_39
+            uri_template_vector_40 uri_template_vector_41 uri_template_vector_42
+            uri_template_vector_43 uri_template_vector_44 uri_template_vector_45
+            uri_template_vector_46 uri_template_vector_47 uri_template_vector_48)
+        add_test(NAME cppmcp_phase5_${test_name}_test
+            COMMAND cppmcp_core_tests phase5_${test_name})
     endforeach()
 endif()

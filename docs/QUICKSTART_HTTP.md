@@ -315,3 +315,98 @@ Bearer challenge fields and can choose whether the client should retry. Use a
 secret store or short-lived token provider in applications rather than embedding
 tokens in source or shell history. Credential values are not included in client
 logs or authentication error messages.
+
+## Prompts, resources, and completion
+
+The shared HTTP and stdio demo registry exposes `summarize`, `code_review`, and
+`ask_name`; static resources include `demo://readme`, `demo://image`, and
+`demo://counter`. It also registers the
+`demo://users/{id}/profile{?format}` resource template. The same methods are
+available over modern, legacy, and dual HTTP modes:
+
+```bash
+post prompts/list '' "$(body prompts/list '')" | jq
+post prompts/get summarize \
+  "$(body prompts/get '\"name\":\"summarize\",\"arguments\":{\"text\":\"hello\"},')" | jq
+post resources/list '' "$(body resources/list '')" | jq
+post resources/templates/list '' "$(body resources/templates/list '')" | jq
+post resources/read 'demo://readme' \
+  "$(body resources/read '\"uri\":\"demo://readme\",')" | jq
+```
+
+`Mcp-Name` mirrors the prompt name for `prompts/get` and the URI for
+`resources/read`; its value uses the same safe encoding as other mirrored MCP
+headers. Completion can use already-resolved prompt arguments:
+
+```bash
+post completion/complete '' \
+  "$(body completion/complete '\"ref\":{\"type\":\"ref/prompt\",\"name\":\"code_review\"},\"argument\":{\"name\":\"framework\",\"value\":\"d\"},\"context\":{\"arguments\":{\"language\":\"python\"}},')" | jq
+```
+
+To see pagination, restart the example with `--page-size 2`. Each list method
+returns an opaque `nextCursor` when another page is available; pass that exact
+cursor in the next request's params. Cursors are scoped to the list kind and
+registry instance.
+
+Prompt and resource handlers can also request input. The bundled client drives
+the modern `requestState` continuation automatically when an elicitation action
+is supplied:
+
+```bash
+./build/cppmcp_http_client --url "$URL" --mode modern \
+  --request prompts/get --params '{"name":"ask_name"}' \
+  --elicit accept --elicit-content '{"name":"Ada"}'
+```
+
+For a curl-only round trip, send the initial modern request with elicitation
+capability metadata, then echo the returned `requestState` unchanged and attach
+the response under the input-request ID:
+
+```bash
+ask='{"jsonrpc":"2.0","id":11,"method":"prompts/get","params":{"name":"ask_name","_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"curl","version":"1"},"io.modelcontextprotocol/clientCapabilities":{"elicitation":{"form":{}}}}}}'
+first="$(curl -sS -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: prompts/get' -H 'Mcp-Name: ask_name' \
+  --data-binary "$ask" "$URL")"
+state="$(jq -r '.result.requestState' <<<"$first")"
+retry="$(jq --arg state "$state" \
+  '.id=12 | .params.requestState=$state |
+   .params.inputResponses={"name":{"action":"accept","content":{"name":"Ada"}}}' \
+  <<<"$ask")"
+curl -sS -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: prompts/get' -H 'Mcp-Name: ask_name' \
+  --data-binary "$retry" "$URL" | jq
+```
+
+The retry uses a new JSON-RPC ID and preserves the original method, prompt name
+and metadata. Do not construct or edit the signed state token.
+
+Resource update subscriptions and list-change notifications use the modern
+`subscriptions/listen` request:
+
+```bash
+./build/cppmcp_http_server --port 8000 --mode dual --tick-ms 1000
+curl -N --max-time 10 \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: subscriptions/listen' \
+  --data-binary @scripts/fixtures/listen_resources_request.json "$URL"
+```
+
+The acknowledgement comes first. Subsequent resource-update events are limited
+to the accepted `resourceSubscriptions`; list-change events are sent only for
+types requested by the client. The bundled client can maintain the resource
+filter and listen across reconnects:
+
+```bash
+./build/cppmcp_http_client --url "$URL" --mode auto --listen \
+  --subscribe-resource demo://counter --duration-ms 30000
+```
+
+With `--resource-root DIR`, the file template `demo://files/{+path}` reads
+bounded files beneath `DIR`. See [SECURITY.md](SECURITY.md) for path and
+symlink restrictions.

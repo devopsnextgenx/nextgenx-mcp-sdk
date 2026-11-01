@@ -108,22 +108,26 @@ auto running = server.start_http(options);
 ```
 
 The `http_server` example exposes the original `echo`, `add`, `slow_count`,
-`emit_demo`, and `weather_like` tools, plus the Phase 4 schema, progress,
-logging, and elicitation examples:
+`emit_demo`, and `weather_like` tools, plus Phase 4 schema/progress/logging/
+elicitation and Phase 5 prompt/resource/template/completion examples:
 
 ```sh
 ./build/cppmcp_http_server --port 8000
 ```
 
 The in-process `McpHttpHandler` remains available for applications that supply
-their own exchange adapter. TLS, `subscriptions/listen`, legacy HTTP sessions,
-and the bundled HTTP client are implemented. Phase 4 adds compiled tool schemas,
-structured output, progress/log callbacks and authenticated multi-round input.
+their own exchange adapter. TLS, modern `subscriptions/listen`, legacy HTTP
+sessions, and the bundled HTTP client are implemented. The example registry
+supports prompts, static and templated resources, completion, pagination,
+resource subscriptions, and MRTR input for prompts/resources. File resources
+are opt-in with `--resource-root`; consult the security guide for platform
+limitations.
 
 See [QUICKSTART_HTTP.md](docs/QUICKSTART_HTTP.md) for curl examples, bearer
 authentication, mirrored parameter headers, and client-tool instructions.
-See [SECURITY.md](docs/SECURITY.md) for schema limits, form-versus-URL input,
-request-state key rotation, authenticated subject binding and replay limitations.
+See [SECURITY.md](docs/SECURITY.md) for schema and file-sandbox limits,
+form-versus-URL input, request-state key rotation, authenticated subject binding
+and replay limitations.
 
 Tools that need request-scoped streaming or disconnect cancellation can use the
 context-handler overload of `Server::add_tool` and call `ToolContext::emit`:

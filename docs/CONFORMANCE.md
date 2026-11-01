@@ -1,5 +1,44 @@
 # Conformance Results
 
+## Phase 5 Profile
+
+The official `@modelcontextprotocol/conformance` CLI was re-run against the
+Phase 5 legacy HTTP server using `--spec-version 2025-11-25 --verbose`. Its
+published version list remains `2025-03-26`, `2025-06-18`, `2025-11-25`,
+`draft`, and `extension`; a request for `2026-07-28` exits 1 with
+`Unknown spec version: 2026-07-28`. The legacy run executed 30 scenarios
+(31 checks) and reported **11 checks passed, 20 failed**:
+
+| Phase 5 scenario | Result | Observation |
+| --- | --- | --- |
+| `resources-list` | Pass | Legacy list request succeeded. |
+| `resources-subscribe` | Pass | Legacy resource subscription succeeded. |
+| `resources-unsubscribe` | Pass | Legacy resource unsubscription succeeded. |
+| `prompts-list` | Pass | Legacy prompt list request succeeded. |
+| `resources-read-text` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+| `resources-read-binary` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+| `resources-templates-read` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+| `prompts-get-simple` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+| `prompts-get-with-args` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+| `prompts-get-embedded-resource` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+| `prompts-get-with-image` | Fail | The CLI did not expose a detailed assertion in verbose output. |
+
+Other passing scenarios were `server-initialize`, `logging-set-level`, `ping`,
+`tools-list`, `server-sse-multiple-streams`, and `dns-rebinding-protection`
+(the latter had two passing checks).
+The other failed scenarios were `completion-complete`, the ten `tools-call-*`
+scenarios, `elicitation-sep1034-defaults`, and `elicitation-sep1330-enums`.
+As with the read/get failures above, the CLI's verbose output did not expose
+individual assertion diagnostics.
+The 2025 suite tests a fixed harness fixture contract; these failures are not
+proof that the modern 2026 behavior is nonconformant. Modern 2026 scenarios
+remain unavailable in this published CLI. The Phase 5 HTTP acceptance gate
+tests prompts/resources, URI-template examples, modern/legacy subscriptions,
+MRTR, and matching headers directly.
+
+The live command output was `Total: 11 passed, 20 failed`; it exited 1.
+The exact command and evidence are recorded in [5_EVIDENCE.md](5_EVIDENCE.md).
+
 ## Phase 4 Profile
 
 The official JSON Schema Test Suite's 46 Draft 2020-12 categories are pinned at

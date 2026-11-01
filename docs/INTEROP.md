@@ -1,6 +1,6 @@
 # HTTP interop evidence
 
-## Phase 5 Host Claude Code Check
+## Phase 4 Host Claude Code Check
 
 Ran the host-installed Claude CLI against the Phase 4 dual-mode HTTP server on
 2026-11-01. The temporary server was registered in user scope, listed, then
@@ -18,6 +18,21 @@ Commands were `claude mcp add --scope user --transport http
 phase4-interop-20261101 http://127.0.0.1:39173/mcp`, `claude mcp list`,
 and `claude mcp remove --scope user phase4-interop-20261101`. This verifies
 connection/health only; it does not exercise prompts or resources.
+
+## Phase 5 Inspector and Claude Code
+
+Ran `scripts/verify_5.sh --slice 4 --sanitizers --interop` on 2026-11-01.
+Against the Phase 5 dual-mode server, MCP Inspector CLI passed
+`prompts/list`, `resources/list`, `resources/read`, and `prompts/get`. The
+Claude Code CLI's `claude mcp list` output was:
+
+```text
+cppmcp-verify: http://127.0.0.1:37975/mcp (HTTP) - ✔ Connected
+```
+
+The gate removed the temporary `cppmcp-verify` entry afterward. The final gate
+reported 114 passed, zero failures, and zero warnings; ASan/UBSan and TSan both
+passed without findings.
 
 ## Phase 4 Local Interop
 

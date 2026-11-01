@@ -40,13 +40,24 @@
 - OpenSSL 3 Crypto is a required core dependency for request-state authentication;
   TLS remains a separate build option. Installed CMake consumers resolve Crypto
   explicitly even when HTTP TLS is disabled.
-- GCC 14.2's optimized ASan build diagnoses libstdc++ regex internals with
-  `-Wmaybe-uninitialized`. Only `src/json_schema.cpp` in GCC ASan builds downgrades
-  that diagnostic from an error; instrumentation stays enabled. Normal builds
-  and TSan keep the existing strict warning policy.
+- Phase 5's example `FeatureRegistry` remains an adapter-level registry, not a
+  public `Server::prompt/resource` builder API. It uses mutex-protected
+  snapshots during dispatch and preserves registration order. Resource reads
+  prefer exact static URIs, then registered templates in order. Pagination
+  cursors are method- and registry-scoped; mutable registry ordering remains a
+  documented limitation for offset cursors.
+- The example URI-template matcher prioritizes deterministic bounded matching
+  for its supported demo forms. It is not a full RFC 6570 implementation.
+  Windows file-backed reads likewise do not yet provide POSIX-equivalent
+  handle-relative symlink/TOCTOU guarantees; see the security guide.
 - Docker's default seccomp profile blocks TSan's process-local ASLR setup in this
   environment. Sanitizer verification uses a disposable, unexposed test container
   with `--security-opt seccomp=unconfined`, not a host security-setting change.
+- GCC's optimized libstdc++ regex implementation emits a false-positive
+  `-Wmaybe-uninitialized` diagnostic in the ASan/UBSan build. Rather than
+  downgrading that warning, compile only `json_schema.cpp` without optimization
+  in that sanitizer configuration; sanitizer instrumentation and strict warning
+  errors remain enabled.
 
 ## Phase 1
 

@@ -16,6 +16,11 @@ namespace cppmcp::transport {
 namespace {
 
 std::string canonical_resource_uri(std::string_view uri) {
+    try {
+        (void)nlohmann::json(uri).dump();
+    } catch (const nlohmann::json::type_error&) {
+        throw std::invalid_argument("resource URI must be valid UTF-8");
+    }
     std::string canonical(uri);
     const auto colon = canonical.find(':');
     if (colon != std::string::npos) {

@@ -127,6 +127,49 @@ Ubuntu 25.04 is the requested development/test base and is out of security
 support. Do not publish it as a production runtime. Bounded fuzz and sanitizer
 runs are not proof that every input or concurrent schedule is safe.
 
+## File sandbox and URI trust boundaries
+
+The example's file-backed resource is opt-in and accepts a relative path from
+the `demo://files/{+path}` template only when `--resource-root` is configured.
+The path is percent-decoded once by template matching; the provider rejects
+residual encoded traversal, `.`/`..` or empty components, absolute and drive
+paths, UNC forms, backslashes, NUL/control bytes, hidden components, and paths
+over 4096 bytes. Reads are capped before and during I/O by
+`--max-resource-bytes`; only regular files are returned. Failures use a generic
+invalid-params error and do not reveal host paths or distinguish forbidden from
+missing files. Text is emitted only for valid UTF-8 with a text-like MIME type;
+other bytes are base64 blobs.
+
+On POSIX the provider opens the root and walks each component with `openat`,
+`O_NOFOLLOW`, and `O_DIRECTORY` for intermediate directories, then checks the
+opened file descriptor with `fstat` and performs bounded reads. This prevents
+symlink traversal and avoids a check-then-open race. The current Windows
+implementation uses canonical-path containment with standard filesystem
+streams; it does not provide equivalent handle-relative reparse-point/TOCTOU
+guarantees and should not be used as a hostile multi-user sandbox. A future
+Windows implementation must use no-follow handles and verify the final path
+from the opened handle before this guarantee can be claimed cross-platform.
+
+The example URI-template matcher has bounded, left-to-right matching and
+percent-decodes captures once. Do not treat URI template values as filesystem
+paths or authorization decisions; each consumer must validate its own
+canonicalized values. Template registration and matching currently cover the
+simple segment form plus the example's reserved path and form-query forms;
+this is not a claim of full RFC 6570 expansion/matching conformance.
+
+Modern listeners are bounded by global/per-peer listener limits, a per-listener
+maximum of 256 resource URIs, and a bounded event queue. Resource filters are
+canonicalized, deduplicated and limited to the first 256 distinct URIs; the
+acknowledgement reports the accepted set. Applications should handle limit
+errors and reconnects explicitly; no notification is delivered for an URI that
+was not accepted or a notification type that was not requested.
+
+Modern cache fields are emitted with a zero TTL for changing counter data and
+otherwise use the example's documented TTL. Applications should use `private`
+scope for authorization-dependent content; `public` is safe only when the
+result cannot vary by caller. Never share private cache entries across
+authorization identities, and do not cache MRTR continuations.
+
 TSan needs process-local ASLR/personality setup that Docker's default seccomp
 profile blocks here. The verification container uses
 `--security-opt seccomp=unconfined` only for isolated testing, with no published

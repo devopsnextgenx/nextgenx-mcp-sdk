@@ -112,6 +112,7 @@ void test_tls_hostname_verification();
 void test_tls_expired_certificate();
 void test_tls_truncated_stream();
 void test_www_auth_listener_retry();
+void test_phase5_case(std::string_view name);
 
 namespace {
 
@@ -258,6 +259,10 @@ int main(int argc, char** argv) {
     run_selected("tls_expired_certificate", test_tls_expired_certificate);
     run_selected("tls_truncated_stream", test_tls_truncated_stream);
     run_selected("www_auth_listener_retry", test_www_auth_listener_retry);
+    if (selected.starts_with("phase5_")) {
+        found = true;
+        run(selected.c_str(), [&] { test_phase5_case(std::string_view(selected).substr(7)); });
+    }
     if (!found) {
         CPPMCP_LOG_ERROR("unknown test case: " << selected);
         return EXIT_FAILURE;
