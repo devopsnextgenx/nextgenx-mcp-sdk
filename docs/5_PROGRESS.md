@@ -3,9 +3,9 @@
 ## Status
 
 Step 0 and Slices 1–3 are committed and their acceptance gates passed:
-`4512727`, `7f9996a`, `18d9f9d`, and `6ab01c8`. Slice 4 implementation and
-verification are complete and the full Slice 4 acceptance gate passes. Added the
-required named Phase 5 CTest coverage, four libFuzzer targets, and the requested
+`4512727`, `7f9996a`, `18d9f9d`, and `6ab01c8`. Slice 4 is committed as
+`632f76e`; its full acceptance gate passes. Slice 4 added the required named
+Phase 5 CTest coverage, four libFuzzer targets, and the requested
 protocol/security/quickstart documentation.
 
 ## Latest verification
