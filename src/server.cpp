@@ -107,6 +107,17 @@ core::Json tool_payload(const ToolDefinition& tool) {
 }  // namespace
 
 Server::CompiledToolSchemas Server::compile_tool_schemas(const ToolDefinition& tool) const {
+    const auto valid_name_char = [](unsigned char ch) {
+        return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+               (ch >= '0' && ch <= '9') || ch == '_' || ch == '.' || ch == '-';
+    };
+    if (tool.name.empty() || tool.name.size() > 128 ||
+        !std::all_of(tool.name.begin(), tool.name.end(), [&](unsigned char ch) {
+            return valid_name_char(ch);
+        })) {
+        throw std::invalid_argument(
+            "tool name must match [A-Za-z0-9_.-]{1,128}");
+    }
     if (!tool.input_schema.is_object() ||
         tool.input_schema.value("type", std::string{}) != "object") {
         throw std::invalid_argument("tool '" + tool.name +

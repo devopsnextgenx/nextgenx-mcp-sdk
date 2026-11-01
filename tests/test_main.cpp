@@ -10,6 +10,8 @@ void test_json_rpc();
 void test_versions();
 void test_schema_contract();
 void test_schema_register();
+void test_tool_name_rule();
+void test_regex_redos_budget();
 void test_schema_limits();
 void test_schema_regex();
 void test_schema_references();
@@ -152,6 +154,8 @@ int main(int argc, char** argv) {
     run_selected("versions", test_versions);
     run_selected("schema_contract", test_schema_contract);
     run_selected("schema_register", test_schema_register);
+    run_selected("tool_name_rule", test_tool_name_rule);
+    run_selected("regex_redos_budget", test_regex_redos_budget);
     run_selected("schema_limits", test_schema_limits);
     run_selected("schema_regex", test_schema_regex);
     run_selected("schema_references", test_schema_references);

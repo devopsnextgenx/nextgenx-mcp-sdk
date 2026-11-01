@@ -20,13 +20,16 @@ and anchors are permitted; cycles and duplicate anchors are rejected. Embedded
 resources requiring duplicate anchors are excluded. This is a restricted profile,
 not an unrestricted schema-conformance claim.
 
-The backend uses standard-library regexes, not a linear-time engine. Patterns
-are limited to 512 bytes and strings/property names in pattern-bearing schemas
-to 1024 bytes. The conservative subset rejects repeated/nested or ambiguous
-quantifiers, repeat counts above 256, lookaround/noncapturing groups,
-backreferences and Unicode property escapes. Unsupported patterns fail during
-registration; they are not silently ignored. Do not raise limits for untrusted
-schemas without evaluating the resulting CPU and stack budget.
+The jsoncons JSON Schema backend evaluates `pattern` and `patternProperties`
+with the C++ standard-library `std::regex` engine (ECMAScript syntax), which
+does not guarantee linear-time matching. The SDK therefore limits patterns to
+512 bytes and input strings/property names to 1024 bytes and rejects repeated
+nested or ambiguous quantifiers, repeat counts above 256, lookaround and
+noncapturing groups, backreferences, and Unicode property escapes. Unsupported
+patterns fail during registration; oversized validation inputs fail before
+regex evaluation. `regex_redos_budget` covers representative catastrophic
+patterns. Do not raise these limits or broaden the accepted syntax for untrusted
+schemas without replacing the engine or establishing a measurable work budget.
 
 ## Authenticated requestState
 

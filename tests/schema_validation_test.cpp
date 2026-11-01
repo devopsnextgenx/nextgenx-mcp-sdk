@@ -2,6 +2,7 @@
 #include "cppmcp/server.hpp"
 #include "test.hpp"
 
+#include <array>
 #include <stdexcept>
 #include <vector>
 
@@ -55,6 +56,70 @@ void test_schema_register() {
                       std::string::npos;
     }
     CPPMCP_CHECK(named_error);
+
+    cppmcp::ToolDefinition referenced_schema;
+    referenced_schema.name = "referenced_schema";
+    referenced_schema.input_schema = {
+        {"type", "object"},
+        {"$defs", {{"displayName", {{"type", "string"}, {"minLength", 1}}}}},
+        {"properties", {
+             {"name", {{"$ref", "#/$defs/displayName"}}},
+             {"nickname",
+              {{"anyOf", nlohmann::json::array({nlohmann::json{{"type", "string"}},
+                                                 nlohmann::json{{"type", "null"}}})}}},
+         }},
+        {"required", {"name"}},
+        {"additionalProperties", false},
+    };
+    referenced_schema.handler = [](const nlohmann::json& args, const nlohmann::json&) {
+        return args.at("name");
+    };
+    server.add_tool(referenced_schema);
+    CPPMCP_CHECK(server.has_tool("referenced_schema"));
+    auto referenced_result = server.handle_request(
+        {6, "tools/call", {{"name", "referenced_schema"},
+                            {"arguments", {{"name", "Ada"}, {"nickname", nullptr}}}}});
+    const auto* referenced_response =
+        std::get_if<cppmcp::core::ResultResponse>(&referenced_result);
+    CPPMCP_CHECK(referenced_response != nullptr);
+    if (referenced_response != nullptr) {
+        CPPMCP_CHECK(!referenced_response->result.value("isError", false));
+    }
+    auto extra_property_result = server.handle_request(
+        {7, "tools/call", {{"name", "referenced_schema"},
+                            {"arguments", {{"name", "Ada"}, {"other", true}}}}});
+    const auto* extra_property_response =
+        std::get_if<cppmcp::core::ResultResponse>(&extra_property_result);
+    CPPMCP_CHECK(extra_property_response != nullptr);
+    if (extra_property_response != nullptr) {
+        CPPMCP_CHECK(extra_property_response->result.value("isError", false));
+    }
+}
+
+void test_tool_name_rule() {
+    cppmcp::Server server;
+    const std::array<std::string, 4> names{
+        "", std::string(129, 'a'), "bad name", "bad/name"};
+    for (const auto& name : names) {
+        cppmcp::ToolDefinition tool;
+        tool.name = name;
+        tool.input_schema = {{"type", "object"}};
+        CPPMCP_CHECK(throws_invalid_argument([&] { server.add_tool(tool); }));
+    }
+    cppmcp::ToolDefinition valid;
+    valid.name = "A_tool.name-1";
+    valid.input_schema = {{"type", "object"}};
+    server.add_tool(valid);
+    CPPMCP_CHECK(server.has_tool(valid.name));
+}
+
+void test_regex_redos_budget() {
+    auto validator = cppmcp::core::make_json_schema_validator();
+    for (const auto* pattern : {"(a+)+$", "(a|aa)+$", "(a|a?)+$", "([a-z]+)*$"}) {
+        CPPMCP_CHECK(throws_invalid_argument([&] {
+            validator->compile({{"type", "string"}, {"pattern", pattern}});
+        }));
+    }
 }
 
 void test_schema_limits() {

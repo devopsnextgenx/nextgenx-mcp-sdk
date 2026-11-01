@@ -1,5 +1,24 @@
 # HTTP interop evidence
 
+## Phase 5 Host Claude Code Check
+
+Ran the host-installed Claude CLI against the Phase 4 dual-mode HTTP server on
+2026-11-01. The temporary server was registered in user scope, listed, then
+removed; no server entry was left in Claude's configuration.
+
+```text
+Added HTTP MCP server phase4-interop-20261101 with URL: http://127.0.0.1:39173/mcp to user config
+Checking MCP server health…
+file-tools: npx -y @modelcontextprotocol/server-filesystem /home/kira - ✔ Connected
+phase4-interop-20261101: http://127.0.0.1:39173/mcp (HTTP) - ✔ Connected
+Removed MCP server phase4-interop-20261101 from user config
+```
+
+Commands were `claude mcp add --scope user --transport http
+phase4-interop-20261101 http://127.0.0.1:39173/mcp`, `claude mcp list`,
+and `claude mcp remove --scope user phase4-interop-20261101`. This verifies
+connection/health only; it does not exercise prompts or resources.
+
 ## Phase 4 Local Interop
 
 The Ubuntu 25.04 Docker environment verified the bundled modern/legacy clients

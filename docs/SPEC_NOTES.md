@@ -19,6 +19,78 @@ still current.
 
 ## Phase 4 Clarifications
 
+The 2026-07-28 changelog removes `notifications/elicitation/complete` and the
+`elicitationId` field. Phase 4 URL elicitation therefore uses the current
+`inputRequests`/`inputResponses` MRTR flow; its legacy adapter may attach the
+legacy ID only when communicating with a negotiated pre-2026 peer.
+
+## Phase 5 specification review
+
+Re-read the 2026-07-28 [prompts](https://modelcontextprotocol.io/specification/2026-07-28/server/prompts),
+[resources](https://modelcontextprotocol.io/specification/2026-07-28/server/resources),
+[completion](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion),
+[pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination),
+[caching](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching),
+[subscriptions](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions),
+and [changelog](https://modelcontextprotocol.io/specification/2026-07-28/changelog)
+pages, the [2026 schema](../schema/2026-07-28/schema.json), and the corresponding
+2025-11-25 prompts, resources, completion, pagination, and subscriptions
+definitions. The 2025 resources page continues to specify legacy
+`resources/subscribe` and `resources/unsubscribe`; the 2026 changelog replaces
+those with `subscriptions/listen`.
+
+The 2026 prompts page states: “Servers that declare the `prompts` capability
+**MUST** respond to `prompts/list` requests with the set of prompts currently
+available to the requesting client.” Its `prompts/list` example includes
+`resultType: "complete"`, `ttlMs`, and `cacheScope`; its `prompts/get` page
+allows MRTR `InputRequiredResult`. The schema's prompt argument map is open
+(`additionalProperties` is not set to false), so unknown prompt argument names
+are accepted and passed to the handler; required declared arguments remain
+enforced.
+
+The 2026 changelog says: “Require `ttlMs` and `cacheScope` fields on results
+returned by `tools/list`, `prompts/list`, `resources/list`, `resources/read`,
+and `resources/templates/list` via a new `CacheableResult` interface.”
+It also states: “Change resource not found error code from `-32002` to
+`-32602` (Invalid Params).” These requirements apply to modern wires. The
+2025-11-25 result shapes do not define either cache field or `resultType`, so
+the compatibility layer strips them on legacy responses.
+
+The 2026 caching page says: “Servers **MUST** provide a `ttlMs` value that is
+`>= 0`.” It defines `"private"` results as reusable only within the same
+authorization context and explicitly says caches **MUST NOT** be shared across
+authorization contexts. It also says MRTR retries carrying `inputResponses` or
+`requestState` “**MUST NOT** be cached.” A zero TTL means immediately stale.
+The `CacheableResult` schema requires all of `resultType`, `ttlMs`, and
+`cacheScope`.
+
+The 2026 resources page states that URI templates use RFC 6570 and that
+`resources/read` returns resource contents. The modern `Mcp-Name` requirement
+is versioned in the changelog with the other standard MCP request headers;
+for `resources/read` the mirrored name is the request URI. Resource-not-found
+is therefore an error, never a successful empty `contents` result.
+
+The 2026 changelog says: “Replace the HTTP GET endpoint and
+`resources/subscribe`/`resources/unsubscribe` with `subscriptions/listen`.”
+The Subscriptions page says: “The server **MUST NOT** send notification types
+the client has not explicitly requested.” Its acknowledgement `notifications`
+field “reflects the subset the server agreed to honor”; unsupported types are
+omitted. Each acknowledgement and notification carries the originating
+JSON-RPC request ID under `io.modelcontextprotocol/subscriptionId`. Thus the
+schema does not require that every requested URI be accepted; the server's
+acknowledgement reports the accepted subset. The subscription filter names are
+`toolsListChanged`, `promptsListChanged`,
+`resourcesListChanged`, and `resourceSubscriptions`; notifications carry the
+listener's `io.modelcontextprotocol/subscriptionId` in `_meta`. Legacy
+resource subscribe/unsubscribe and update notifications remain session-scoped
+per the 2025 resources page.
+
+The same changelog says “All results now carry a required `resultType` field”
+for current-era results and defines `"complete"` for ordinary results. Its
+MRTR section describes `inputRequests` plus retry-time `inputResponses`.
+The 2026 schema confirms that `notifications/elicitation/complete` and
+`elicitationId` are absent; no current-era completion notification is sent.
+
 The checked-in 2026 schema defines `InputRequests` as an ID-keyed object, not an
 array. An `input_required` result has at least one of `inputRequests` or
 `requestState`; state-only continuation is valid. Retry the original parameters,

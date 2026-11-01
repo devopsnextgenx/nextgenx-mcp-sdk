@@ -304,7 +304,7 @@ if (( SLICE >= 3 )); then
       ev | jq -e 'select(.method=="notifications/resources/updated" and .params.uri=="demo://other")' >/dev/null 2>&1 && bad "update delivered for a URI the client did not subscribe to" || ok "no updates for unsubscribed URIs"
       ev | jq -e 'select(.method=="notifications/prompts/list_changed")' >/dev/null 2>&1 && ok "prompts/list_changed delivered" || bad "no prompts/list_changed"
       ev | jq -e 'select(.method=="notifications/resources/list_changed")' >/dev/null 2>&1 && ok "resources/list_changed delivered" || bad "no resources/list_changed"
-      jq 'del(.params.resourceSubscriptions) | del(.params.notifications.resourceSubscriptions) | del(.params.subscriptions.resourceSubscriptions)' "$FIX" >"$LOG_DIR/listen_nosub.json"
+      jq 'walk(if type=="object" then del(.resourceSubscriptions) else . end)' "$FIX" >"$LOG_DIR/listen_nosub.json"
       curl -sN -m 3 -o "$LOG_DIR/ls2.body" "${MH[@]}" -H 'Mcp-Method: subscriptions/listen' -d @"$LOG_DIR/listen_nosub.json" "$U3" >/dev/null 2>&1
       grep '^data:' "$LOG_DIR/ls2.body" | sed 's/^data: *//' | jq -e 'select(.method=="notifications/resources/updated")' >/dev/null 2>&1 && bad "updates delivered without a resource subscription" || ok "no resource updates without resourceSubscriptions"
     else bad "missing $FIX"; fi

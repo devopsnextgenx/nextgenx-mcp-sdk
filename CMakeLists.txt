@@ -77,11 +77,6 @@ set(CPPMCP_SOURCES
     src/connection.cpp
 )
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_FLAGS MATCHES "-fsanitize=address")
-    set_source_files_properties(src/json_schema.cpp PROPERTIES
-        COMPILE_OPTIONS "-Wno-error=maybe-uninitialized")
-endif()
-
 set(CPPMCP_SERVER_SOURCES
     src/server.cpp
     src/subscription_registry.cpp

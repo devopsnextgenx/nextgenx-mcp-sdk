@@ -117,17 +117,16 @@ void test_http_handler() {
 
     Server server({"http-test-server", "HTTP test server", "1.0"});
     add_echo_tool(server);
-    constexpr auto non_ascii_name = "\xE5\xB7\xA5\xE5\x85\xB7";
-    server.add_tool(ToolDefinition{
-        .name = non_ascii_name,
-        .title = "Encoded name",
-        .description = "Checks the encoded Mcp-Name value.",
-        .input_schema = Json::object({{"type", "object"}}),
-        .output_schema = Json::object(),
-        .annotations = cppmcp::ToolAnnotation{},
-        .meta = Json::object(),
-        .handler = [](const Json&, const Json&) { return "encoded"; },
-    });
+    bool non_ascii_name_rejected = false;
+    try {
+        ToolDefinition invalid_name;
+        invalid_name.name = "\xE5\xB7\xA5\xE5\x85\xB7";
+        invalid_name.input_schema = Json::object({{"type", "object"}});
+        server.add_tool(std::move(invalid_name));
+    } catch (const std::invalid_argument&) {
+        non_ascii_name_rejected = true;
+    }
+    CPPMCP_CHECK(non_ascii_name_rejected);
     McpHttpHandler handler(server);
 
     auto discover = std::make_shared<MockExchange>(
@@ -145,14 +144,6 @@ void test_http_handler() {
     handler.handle(call);
     CPPMCP_CHECK(call->status == 200);
     CPPMCP_CHECK(response_json(*call)["result"]["structuredContent"] == "echo");
-
-    auto encoded_name_request =
-        make_request("tools/call", {{"name", non_ascii_name}, {"arguments", Json::object()}});
-    add_name_header(encoded_name_request, non_ascii_name);
-    auto encoded_name = std::make_shared<MockExchange>(std::move(encoded_name_request));
-    handler.handle(encoded_name);
-    CPPMCP_CHECK(encoded_name->status == 200);
-    CPPMCP_CHECK(response_json(*encoded_name)["result"]["structuredContent"] == "encoded");
 
     auto wrong_case_request = make_request("tools/list");
     for (auto& [name, _] : wrong_case_request.headers) {
