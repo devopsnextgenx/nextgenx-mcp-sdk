@@ -11,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <set>
 #include <stop_token>
 #include <stdexcept>
 #include <string>
@@ -943,7 +944,15 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                 legacy_sessions()[sid].capabilities = rpc_request.params.value(
                     "capabilities", Json::object());
             }
-            server_.subscriptions_->register_legacy_session(sid, true);
+            bool prompts_list_changed = false;
+            bool resources_list_changed = false;
+            {
+                std::lock_guard<std::mutex> server_lock(server_.mutex_);
+                prompts_list_changed = server_.request_handlers_.contains("prompts/get");
+                resources_list_changed = server_.request_handlers_.contains("resources/read");
+            }
+            server_.subscriptions_->register_legacy_session(
+                sid, true, prompts_list_changed, resources_list_changed);
             const auto response = core::ResultResponse{rpc_request.id, std::move(result)};
             exchange->respond(200, {{"Mcp-Session-Id", sid}, {"Content-Type", "application/json"}},
                              core::serialize_message(response));
@@ -971,6 +980,38 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             respond_error(*exchange, 400,
                           core::protocol_error(ErrorCode::unsupported_protocol_version,
                                                "Unsupported protocol version"));
+            return;
+        }
+        if (rpc_request.method == "resources/subscribe" ||
+            rpc_request.method == "resources/unsubscribe") {
+            const auto uri = rpc_request.params.is_object()
+                                 ? rpc_request.params.value("uri", std::string{})
+                                 : std::string{};
+            if (uri.empty()) {
+                respond_error(*exchange, 200,
+                              core::protocol_error(ErrorCode::invalid_params,
+                                                   "uri is required"),
+                              rpc_request.id);
+                return;
+            }
+            try {
+                const bool on = rpc_request.method == "resources/subscribe";
+                if (!server_.subscriptions_->subscribe_legacy_resource(*session_id, uri, on)) {
+                    respond_error(*exchange, 404,
+                                  core::protocol_error(ErrorCode::invalid_request,
+                                                       "Unknown legacy session"),
+                                  rpc_request.id);
+                    return;
+                }
+            } catch (const SubscriptionLimitError& error) {
+                respond_error(*exchange, 429,
+                              core::protocol_error(ErrorCode::invalid_request, error.what()),
+                              rpc_request.id);
+                return;
+            }
+            const core::ResultResponse result{rpc_request.id, Json::object()};
+            exchange->respond(200, {{"Content-Type", "application/json"}},
+                              core::serialize_message(result));
             return;
         }
         auto cancellation = std::make_shared<std::stop_source>();
@@ -1138,13 +1179,29 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             }
         }
 
-        const bool tools_requested =
-            notifications->value("toolsListChanged", false);
+        const bool tools_requested = notifications->value("toolsListChanged", false);
+        const bool prompts_requested = notifications->value("promptsListChanged", false);
+        const bool resources_requested =
+            notifications->value("resourcesListChanged", false);
         SubscriptionFilter filter;
         filter.tools_list_changed = tools_requested;
+        filter.prompts_list_changed = prompts_requested;
+        filter.resources_list_changed = resources_requested;
         core::Json accepted = core::Json::object();
         if (tools_requested) {
             accepted["toolsListChanged"] = true;
+        }
+        if (prompts_requested) accepted["promptsListChanged"] = true;
+        if (resources_requested) accepted["resourcesListChanged"] = true;
+        if (notifications->contains("resourceSubscriptions")) {
+            std::set<std::string> seen;
+            auto& accepted_uris = filter.resource_subscriptions;
+            for (const auto& uri : (*notifications)["resourceSubscriptions"]) {
+                if (accepted_uris.size() == 256) break;
+                const auto value = uri.get<std::string>();
+                if (seen.insert(value).second) accepted_uris.push_back(value);
+            }
+            accepted["resourceSubscriptions"] = accepted_uris;
         }
 
         const auto registry = server_.subscriptions_;

@@ -1760,4 +1760,85 @@ std::shared_ptr<transport::ListenHandle> Client::listen(
     return handle;
 }
 
+void Client::subscribe_resource(
+    std::string uri, std::function<void(const core::Notification&)> callback) {
+    if (uri.empty() || !callback) {
+        throw std::invalid_argument("resource subscription requires a URI and callback");
+    }
+    const auto http_transport =
+        std::dynamic_pointer_cast<transport::HttpClientTransport>(transport_);
+    if (!connection_ || !http_transport) {
+        throw std::runtime_error("resource subscriptions require a connected HTTP client");
+    }
+    std::lock_guard<std::mutex> update_lock(resource_subscription_update_mutex_);
+    if (!http_transport->is_modern()) {
+        (void)connection_->send_request("resources/subscribe", {{"uri", uri}}).get();
+    }
+    {
+        std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+        resource_callbacks_.insert_or_assign(std::move(uri), std::move(callback));
+    }
+    refresh_resource_listener();
+}
+
+void Client::unsubscribe_resource(std::string_view uri) {
+    const auto http_transport =
+        std::dynamic_pointer_cast<transport::HttpClientTransport>(transport_);
+    if (!connection_ || !http_transport) {
+        throw std::runtime_error("resource subscriptions require a connected HTTP client");
+    }
+    std::lock_guard<std::mutex> update_lock(resource_subscription_update_mutex_);
+    const std::string key(uri);
+    {
+        std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+        if (!resource_callbacks_.contains(key)) return;
+    }
+    if (!http_transport->is_modern()) {
+        (void)connection_->send_request("resources/unsubscribe", {{"uri", key}}).get();
+    }
+    {
+        std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+        resource_callbacks_.erase(key);
+    }
+    refresh_resource_listener();
+}
+
+void Client::refresh_resource_listener() {
+    const auto http_transport =
+        std::dynamic_pointer_cast<transport::HttpClientTransport>(transport_);
+    if (!http_transport) throw std::runtime_error("resource subscriptions require HTTP");
+    std::shared_ptr<transport::ListenHandle> previous;
+    std::vector<std::string> uris;
+    {
+        std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+        previous = std::move(resource_listen_handle_);
+        uris.reserve(resource_callbacks_.size());
+        for (const auto& [uri, _] : resource_callbacks_) uris.push_back(uri);
+    }
+    if (previous) previous->close();
+    if (uris.empty()) return;
+
+    nlohmann::json filter = nlohmann::json::object();
+    if (http_transport->is_modern()) filter["resourceSubscriptions"] = uris;
+    auto handle = http_transport->listen(
+        std::move(filter),
+        [this](const core::Notification& notification) {
+            if (notification.method != "notifications/resources/updated") return;
+            const auto uri = notification.params.value("uri", std::string{});
+            std::function<void(const core::Notification&)> callback;
+            {
+                std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+                const auto found = resource_callbacks_.find(uri);
+                if (found != resource_callbacks_.end()) callback = found->second;
+            }
+            if (callback) callback(notification);
+        });
+    std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+    resource_listen_handle_ = std::move(handle);
+    listen_closers_.emplace_back(
+        [weak_handle = std::weak_ptr<transport::ListenHandle>(resource_listen_handle_)] {
+            if (const auto active_handle = weak_handle.lock()) active_handle->close();
+        });
+}
+
 }  // namespace cppmcp

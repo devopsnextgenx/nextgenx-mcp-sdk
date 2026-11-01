@@ -512,6 +512,7 @@ public:
     using ToolExecutor = std::function<core::Message(const core::Request&, std::stop_token)>;
     // Pushes a server->client notification on the current connection (stdio).
     using Notifier = std::function<void(const std::string& method, const Json& params)>;
+    using ListChangedNotifier = std::function<void(const std::string& resource_kind)>;
 
     explicit FeatureRegistry(FeatureOptions options = {})
         : options_(options), cursor_namespace_(detail::next_cursor_namespace()) {}
@@ -521,16 +522,60 @@ public:
 
     // -- registration ------------------------------------------------------
     void add_prompt(PromptDefinition prompt) {
-        std::lock_guard lock(mutex_);
-        prompts_.push_back(std::move(prompt));
+        {
+            std::lock_guard lock(mutex_);
+            prompts_.push_back(std::move(prompt));
+        }
+        emit_list_changed("prompts");
     }
     void add_resource(ResourceDefinition resource) {
-        std::lock_guard lock(mutex_);
-        resources_.push_back(std::move(resource));
+        {
+            std::lock_guard lock(mutex_);
+            resources_.push_back(std::move(resource));
+        }
+        emit_list_changed("resources");
     }
     void add_resource_template(ResourceTemplateDefinition tmpl) {
-        std::lock_guard lock(mutex_);
-        templates_.push_back(std::move(tmpl));
+        {
+            std::lock_guard lock(mutex_);
+            templates_.push_back(std::move(tmpl));
+        }
+        emit_list_changed("resources");
+    }
+    bool remove_prompt(std::string_view name) {
+        bool removed = false;
+        {
+            std::lock_guard lock(mutex_);
+            const auto before = prompts_.size();
+            std::erase_if(prompts_, [name](const auto& item) { return item.name == name; });
+            removed = prompts_.size() != before;
+        }
+        if (removed) emit_list_changed("prompts");
+        return removed;
+    }
+    bool remove_resource(std::string_view uri) {
+        bool removed = false;
+        {
+            std::lock_guard lock(mutex_);
+            const auto before = resources_.size();
+            std::erase_if(resources_, [uri](const auto& item) { return item.uri == uri; });
+            removed = resources_.size() != before;
+        }
+        if (removed) emit_list_changed("resources");
+        return removed;
+    }
+    bool remove_resource_template(std::string_view uri_template) {
+        bool removed = false;
+        {
+            std::lock_guard lock(mutex_);
+            const auto before = templates_.size();
+            std::erase_if(templates_, [uri_template](const auto& item) {
+                return item.uri_template == uri_template;
+            });
+            removed = templates_.size() != before;
+        }
+        if (removed) emit_list_changed("resources");
+        return removed;
     }
     void add_file_resource_template() {
         if (options_.resource_root.empty()) return;
@@ -562,6 +607,10 @@ public:
     void set_notifier(Notifier notifier) {
         std::lock_guard lock(mutex_);
         notifier_ = std::move(notifier);
+    }
+    void set_list_changed_notifier(ListChangedNotifier notifier) {
+        std::lock_guard lock(mutex_);
+        list_changed_notifier_ = std::move(notifier);
     }
 
     // Call before tearing down whatever the notifier / executor refer to.
@@ -636,6 +685,15 @@ public:
     }
 
 private:
+    void emit_list_changed(const std::string& kind) {
+        ListChangedNotifier notifier;
+        {
+            std::lock_guard lock(mutex_);
+            notifier = list_changed_notifier_;
+        }
+        if (notifier) notifier(kind);
+    }
+
     struct TaskRecord {
         std::string id;
         std::string status = "working";
@@ -1104,6 +1162,7 @@ private:
     std::map<std::string, std::shared_ptr<TaskRecord>> tasks_;
     ToolExecutor executor_;
     Notifier notifier_;
+    ListChangedNotifier list_changed_notifier_;
 };
 
 // Runs tools/call through the real Server. Used for task-augmented calls.

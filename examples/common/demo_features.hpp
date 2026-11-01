@@ -15,6 +15,9 @@ namespace cppmcp::examples {
 
 namespace demo {
 
+inline std::atomic<int> counter_value{0};
+inline std::atomic<int> other_value{0};
+
 struct City {
     const char* name;
     int temp_c;
@@ -210,7 +213,23 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .title = "Counter",
         .description = "A counter resource.",
         .mime_type = "text/plain",
-        .read = [] { return ResourceContent{std::string("counter=0"), std::nullopt, std::nullopt}; },
+        .read = [] {
+            return ResourceContent{
+                "counter=" + std::to_string(demo::counter_value.load(std::memory_order_relaxed)),
+                std::nullopt, std::nullopt};
+        },
+    });
+    registry.add_resource({
+        .uri = "demo://other",
+        .name = "other",
+        .title = "Other counter",
+        .description = "An alternate changing resource.",
+        .mime_type = "text/plain",
+        .read = [] {
+            return ResourceContent{
+                "other=" + std::to_string(demo::other_value.load(std::memory_order_relaxed)),
+                std::nullopt, std::nullopt};
+        },
     });
     registry.add_resource({
         .uri = "demo://secret/needs_confirm",

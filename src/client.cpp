@@ -8,6 +8,10 @@ namespace cppmcp {
 Client::Client(ClientInfo info, NegotiationPolicy policy)
     : info_(std::move(info)), policy_(policy) {}
 
+Client::~Client() {
+    close();
+}
+
 void Client::connect(std::shared_ptr<cppmcp::core::ITransport> transport) {
     legacy_transport_ = false;
     transport_ = std::move(transport);
@@ -23,10 +27,16 @@ void Client::connect(std::shared_ptr<cppmcp::core::ITransport> transport) {
 }
 
 void Client::close() {
+    std::lock_guard<std::mutex> update_lock(resource_subscription_update_mutex_);
     for (const auto& close_listen : listen_closers_) {
         close_listen();
     }
     listen_closers_.clear();
+    {
+        std::lock_guard<std::mutex> lock(resource_subscription_mutex_);
+        resource_listen_handle_.reset();
+        resource_callbacks_.clear();
+    }
     if (connection_) {
         connection_->close();
     }

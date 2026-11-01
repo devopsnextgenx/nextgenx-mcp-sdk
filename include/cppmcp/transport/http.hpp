@@ -182,7 +182,10 @@ public:
     void notify_prompts_list_changed();
     void notify_resources_list_changed();
     void notify_resource_updated(std::string_view uri);
-    void register_legacy_session(std::string session_id, bool tools_list_changed);
+    void register_legacy_session(std::string session_id, bool tools_list_changed,
+                                 bool prompts_list_changed = false,
+                                 bool resources_list_changed = false);
+    bool subscribe_legacy_resource(std::string_view session_id, std::string uri, bool on);
     void remove_legacy_session(std::string_view session_id);
     [[nodiscard]] LegacyStreamToken open_legacy_stream(std::string_view session_id);
     SubscriptionReadStatus next_legacy_stream(const LegacyStreamToken& token,

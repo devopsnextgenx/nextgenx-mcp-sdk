@@ -9,6 +9,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -46,6 +47,7 @@ public:
 
     Client(ClientInfo info = {"cppmcp-client", "cppmcp client", "0.1.0"},
            NegotiationPolicy policy = NegotiationPolicy::prefer_modern);
+    ~Client();
 
     void connect(std::shared_ptr<cppmcp::core::ITransport> transport);
     void connect_http(HttpClientOptions options);
@@ -57,6 +59,10 @@ public:
         std::function<void(const core::Notification&)> callback,
         transport::ListenCallbacks callbacks = {},
         transport::ListenOptions options = {});
+    void subscribe_resource(
+        std::string uri,
+        std::function<void(const core::Notification&)> callback);
+    void unsubscribe_resource(std::string_view uri);
 
     nlohmann::json discover();
     nlohmann::json list_tools();
@@ -68,6 +74,7 @@ public:
 private:
     void handle_server_notification(const core::Notification& notification);
     void handle_server_request(const core::Request& request);
+    void refresh_resource_listener();
 
     struct ActiveToolCall {
         CallToolOptions options;
@@ -79,6 +86,11 @@ private:
     std::shared_ptr<cppmcp::core::ITransport> transport_;
     std::shared_ptr<cppmcp::core::Connection> connection_;
     std::vector<std::function<void()>> listen_closers_;
+    std::mutex resource_subscription_update_mutex_;
+    std::mutex resource_subscription_mutex_;
+    std::map<std::string, std::function<void(const core::Notification&)>>
+        resource_callbacks_;
+    std::shared_ptr<transport::ListenHandle> resource_listen_handle_;
     std::atomic<std::uint64_t> next_progress_token_{1};
     std::mutex tool_callbacks_mutex_;
     std::map<std::string, ActiveToolCall> active_tool_calls_;

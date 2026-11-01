@@ -63,7 +63,8 @@ Json parse_object(const char* flag, const char* text) {
 int main(int argc, char** argv) {
     try {
         cppmcp::HttpClientOptions options;
-        std::string token, log_level, elicit_action, rpc_method, request_method, task_tool, subscribe_uri;
+        std::string token, log_level, elicit_action, rpc_method, request_method, task_tool;
+        std::vector<std::string> subscribe_uris;
         std::optional<std::string> requested_call;
         Json call_args = Json::object(), elicit_content = Json::object(), rpc_params = Json::object();
         bool progress = false, listen = false, demo = false;
@@ -76,7 +77,7 @@ int main(int argc, char** argv) {
                 argument == "--log-level" || argument == "--elicit" || argument == "--elicit-content" ||
                 argument == "--rpc" || argument == "--rpc-params" || argument == "--request" ||
                 argument == "--params" || argument == "--task" ||
-                argument == "--subscribe";
+                argument == "--subscribe" || argument == "--subscribe-resource";
             if (takes_value && i + 1 >= argc) throw std::invalid_argument("missing value for " + std::string(argument));
             if (argument == "--url") options.url = argv[++i];
             else if (argument == "--mode") options.policy = parse_mode(argv[++i]);
@@ -100,7 +101,9 @@ int main(int argc, char** argv) {
             else if (argument == "--request") request_method = argv[++i];
             else if (argument == "--params") rpc_params = parse_object("--params", argv[++i]);
             else if (argument == "--task") task_tool = argv[++i];
-            else if (argument == "--subscribe") subscribe_uri = argv[++i];
+            else if (argument == "--subscribe" || argument == "--subscribe-resource") {
+                subscribe_uris.emplace_back(argv[++i]);
+            }
             else throw std::invalid_argument("unknown option: " + std::string(argument));
         }
         if (options.url.empty()) throw std::invalid_argument("--url is required");
@@ -108,7 +111,7 @@ int main(int argc, char** argv) {
         if (!elicit_action.empty() || demo) options.client_capabilities["elicitation"] = {{"form", Json::object()}};
 
         const bool use_ext = demo || !rpc_method.empty() || !request_method.empty() ||
-                             !task_tool.empty() || !subscribe_uri.empty();
+                             !task_tool.empty() || !subscribe_uris.empty();
 
         cppmcp::Client client;
         std::shared_ptr<cppmcp::transport::HttpClientTransport> http;
@@ -209,9 +212,12 @@ int main(int argc, char** argv) {
                     std::cout << "TASK !! " << e.what() << '\n';
                 }
             }
-            if (!subscribe_uri.empty()) {
-                cppmcp::examples::step("resources/subscribe " + subscribe_uri,
-                                       [&] { return features.subscribe(subscribe_uri); });
+            if (!subscribe_uris.empty() &&
+                (!listen || !http->is_modern())) {
+                for (const auto& uri : subscribe_uris) {
+                    cppmcp::examples::step("resources/subscribe " + uri,
+                                           [&] { return features.subscribe(uri); });
+                }
             }
         }
 
@@ -224,7 +230,7 @@ int main(int argc, char** argv) {
             if (use_ext) {
                 filter["promptsListChanged"] = true;
                 filter["resourcesListChanged"] = true;
-                if (!subscribe_uri.empty()) filter["resourceSubscriptions"] = Json::array({subscribe_uri});
+                if (!subscribe_uris.empty()) filter["resourceSubscriptions"] = subscribe_uris;
             }
             auto on_note = [](const cppmcp::core::Notification& n) {
                 std::cout << "NOTIFY " << n.method;

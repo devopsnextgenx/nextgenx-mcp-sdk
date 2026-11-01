@@ -1,15 +1,52 @@
 #include "cppmcp/transport/http.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <condition_variable>
 #include <deque>
 #include <map>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace cppmcp::transport {
+
+namespace {
+
+std::string canonical_resource_uri(std::string_view uri) {
+    std::string canonical(uri);
+    const auto colon = canonical.find(':');
+    if (colon != std::string::npos) {
+        std::transform(canonical.begin(), canonical.begin() + static_cast<std::ptrdiff_t>(colon),
+                       canonical.begin(), [](unsigned char ch) {
+                           return static_cast<char>(std::tolower(ch));
+                       });
+        if (canonical.compare(colon + 1, 2, "//") == 0) {
+            const auto authority_end = canonical.find('/', colon + 3);
+            const auto end = authority_end == std::string::npos ? canonical.size() : authority_end;
+            std::transform(canonical.begin() + static_cast<std::ptrdiff_t>(colon + 3),
+                           canonical.begin() + static_cast<std::ptrdiff_t>(end),
+                           canonical.begin() + static_cast<std::ptrdiff_t>(colon + 3),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+        }
+    }
+    for (std::size_t i = 0; i + 2 < canonical.size(); ++i) {
+        if (canonical[i] == '%' &&
+            std::isxdigit(static_cast<unsigned char>(canonical[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(canonical[i + 2]))) {
+            canonical[i + 1] = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(canonical[i + 1])));
+            canonical[i + 2] = static_cast<char>(
+                std::toupper(static_cast<unsigned char>(canonical[i + 2])));
+            i += 2;
+        }
+    }
+    return canonical;
+}
+
+}  // namespace
 
 struct SubscriptionRegistry::Impl {
     struct LegacyQueue {
@@ -23,6 +60,9 @@ struct SubscriptionRegistry::Impl {
 
     struct LegacySession {
         bool tools_list_changed = false;
+        bool prompts_list_changed = false;
+        bool resources_list_changed = false;
+        std::set<std::string> resource_subscriptions;
         std::deque<nlohmann::json> pending;
         std::size_t pending_bytes = 0;
         std::shared_ptr<LegacyQueue> stream;
@@ -114,15 +154,12 @@ struct SubscriptionRegistry::Impl {
         session.pending_bytes += bytes;
     }
 
-    void notify_legacy_tools() {
-        const nlohmann::json message{
-            {"jsonrpc", "2.0"},
-            {"method", "notifications/tools/list_changed"},
-            {"params", nlohmann::json::object()},
-        };
+    void publish_legacy(
+        const nlohmann::json& message,
+        const std::function<bool(const LegacySession&)>& predicate) {
         std::lock_guard<std::mutex> lock(mutex);
         for (auto& [_, session] : legacy_sessions) {
-            if (!session.tools_list_changed) {
+            if (!predicate(session)) {
                 continue;
             }
             if (!session.stream) {
@@ -169,6 +206,17 @@ SubscriptionRegistry::~SubscriptionRegistry() {
 std::uint64_t SubscriptionRegistry::subscribe(std::string peer,
                                              nlohmann::json subscription_id,
                                              SubscriptionFilter filter) {
+    constexpr std::size_t kMaxResourceSubscriptions = 256;
+    std::vector<std::string> accepted_uris;
+    std::set<std::string> unique_uris;
+    for (const auto& uri : filter.resource_subscriptions) {
+        auto canonical = canonical_resource_uri(uri);
+        if (unique_uris.insert(canonical).second &&
+            accepted_uris.size() < kMaxResourceSubscriptions) {
+            accepted_uris.push_back(std::move(canonical));
+        }
+    }
+    filter.resource_subscriptions = std::move(accepted_uris);
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (impl_->subscribers.size() >= impl_->global_limit) {
         throw SubscriptionLimitError("global subscription limit reached");
@@ -247,7 +295,10 @@ void SubscriptionRegistry::notify_tools_list_changed() {
                    [](const auto& subscriber) {
                        return subscriber.filter.tools_list_changed;
                    });
-    impl_->notify_legacy_tools();
+    impl_->publish_legacy(
+        {{"jsonrpc", "2.0"}, {"method", "notifications/tools/list_changed"},
+         {"params", nlohmann::json::object()}},
+        [](const auto& session) { return session.tools_list_changed; });
 }
 
 void SubscriptionRegistry::notify_prompts_list_changed() {
@@ -255,6 +306,10 @@ void SubscriptionRegistry::notify_prompts_list_changed() {
                    [](const auto& subscriber) {
                        return subscriber.filter.prompts_list_changed;
                    });
+    impl_->publish_legacy(
+        {{"jsonrpc", "2.0"}, {"method", "notifications/prompts/list_changed"},
+         {"params", nlohmann::json::object()}},
+        [](const auto& session) { return session.prompts_list_changed; });
 }
 
 void SubscriptionRegistry::notify_resources_list_changed() {
@@ -262,24 +317,59 @@ void SubscriptionRegistry::notify_resources_list_changed() {
                    [](const auto& subscriber) {
                        return subscriber.filter.resources_list_changed;
                    });
+    impl_->publish_legacy(
+        {{"jsonrpc", "2.0"}, {"method", "notifications/resources/list_changed"},
+         {"params", nlohmann::json::object()}},
+        [](const auto& session) { return session.resources_list_changed; });
 }
 
 void SubscriptionRegistry::notify_resource_updated(std::string_view uri) {
     nlohmann::json params{{"uri", uri}};
+    const auto canonical_uri = canonical_resource_uri(uri);
     impl_->publish("notifications/resources/updated", params,
-                   [uri](const auto& subscriber) {
+                   [&canonical_uri](const auto& subscriber) {
                        return std::find(subscriber.filter.resource_subscriptions.begin(),
-                                        subscriber.filter.resource_subscriptions.end(), uri) !=
+                                        subscriber.filter.resource_subscriptions.end(), canonical_uri) !=
                               subscriber.filter.resource_subscriptions.end();
                    });
+    impl_->publish_legacy(
+        {{"jsonrpc", "2.0"}, {"method", "notifications/resources/updated"},
+         {"params", std::move(params)}},
+        [&canonical_uri](const auto& session) {
+            return session.resource_subscriptions.contains(canonical_uri);
+        });
 }
 
 void SubscriptionRegistry::register_legacy_session(std::string session_id,
-                                                    bool tools_list_changed) {
+                                                    bool tools_list_changed,
+                                                    bool prompts_list_changed,
+                                                    bool resources_list_changed) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     Impl::LegacySession session;
     session.tools_list_changed = tools_list_changed;
+    session.prompts_list_changed = prompts_list_changed;
+    session.resources_list_changed = resources_list_changed;
     impl_->legacy_sessions.insert_or_assign(std::move(session_id), std::move(session));
+}
+
+bool SubscriptionRegistry::subscribe_legacy_resource(std::string_view session_id,
+                                                     std::string uri, bool on) {
+    constexpr std::size_t kMaxResourceSubscriptions = 256;
+    auto canonical = canonical_resource_uri(uri);
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto found = impl_->legacy_sessions.find(std::string(session_id));
+    if (found == impl_->legacy_sessions.end()) return false;
+    auto& subscriptions = found->second.resource_subscriptions;
+    if (on) {
+        if (!subscriptions.contains(canonical) &&
+            subscriptions.size() >= kMaxResourceSubscriptions) {
+            throw SubscriptionLimitError("legacy resource subscription limit reached");
+        }
+        subscriptions.insert(std::move(canonical));
+    } else {
+        subscriptions.erase(canonical);
+    }
+    return true;
 }
 
 void SubscriptionRegistry::remove_legacy_session(std::string_view session_id) {

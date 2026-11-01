@@ -216,6 +216,8 @@ int main(int argc, char** argv) {
         cppmcp::transport::HttpOptions options;
         cppmcp::examples::FeatureOptions feature_options;
         std::string tls_cert, tls_key;
+        std::chrono::milliseconds tick_interval{0};
+        std::chrono::milliseconds churn_interval{0};
         bool sdk_listener = false;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
@@ -225,6 +227,8 @@ int main(int argc, char** argv) {
                 feature_options.max_resource_bytes = parse_size(argv[++i], "--max-resource-bytes");
             else if (argument == "--page-size" && i + 1 < argc)
                 feature_options.page_size = parse_size(argv[++i], "--page-size");
+            else if (argument == "--tick-ms" && i + 1 < argc) tick_interval = parse_ms(argv[++i]);
+            else if (argument == "--churn-ms" && i + 1 < argc) churn_interval = parse_ms(argv[++i]);
             else if (argument == "--bind" && i + 1 < argc) options.bind_address = argv[++i];
             else if (argument == "--mode" && i + 1 < argc) { options.mode = parse_mode(argv[++i]); options.handler.mode = options.mode; }
             else if (argument == "--ping-interval-ms" && i + 1 < argc) options.handler.ping_interval = parse_ms(argv[++i]);
@@ -274,6 +278,10 @@ int main(int argc, char** argv) {
         registry.set_notifier([&server](const std::string& method, const Json& params) {
             if (method == "notifications/resources/updated") server.notify_resource_updated(params.value("uri", std::string{}));
         });
+        registry.set_list_changed_notifier([&server](const std::string& kind) {
+            if (kind == "prompts") server.notify_prompts_list_changed();
+            else if (kind == "resources") server.notify_resources_list_changed();
+        });
 
         std::jthread notifier;
         if (options.notify_interval.count() > 0) {
@@ -289,11 +297,77 @@ int main(int argc, char** argv) {
                 }
             });
         }
+        std::jthread ticker;
+        if (tick_interval.count() > 0) {
+            ticker = std::jthread([&, next_counter = true](std::stop_token stop) mutable {
+                while (!stop.stop_requested()) {
+                    const auto until = std::chrono::steady_clock::now() + tick_interval;
+                    while (!stop.stop_requested() && std::chrono::steady_clock::now() < until) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    if (stop.stop_requested()) break;
+                    const std::string uri = next_counter ? "demo://counter" : "demo://other";
+                    if (next_counter) {
+                        cppmcp::examples::demo::counter_value.fetch_add(
+                            1, std::memory_order_relaxed);
+                    } else {
+                        cppmcp::examples::demo::other_value.fetch_add(
+                            1, std::memory_order_relaxed);
+                    }
+                    next_counter = !next_counter;
+                    server.notify_resource_updated(uri);
+                }
+            });
+        }
+        std::jthread churn;
+        if (churn_interval.count() > 0) {
+            churn = std::jthread([&](std::stop_token stop) {
+                bool registered = false;
+                while (!stop.stop_requested()) {
+                    const auto until = std::chrono::steady_clock::now() + churn_interval;
+                    while (!stop.stop_requested() && std::chrono::steady_clock::now() < until) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    if (stop.stop_requested()) break;
+                    if (registered) {
+                        registry.remove_prompt("dynamic_prompt");
+                        registry.remove_resource("demo://dynamic");
+                    } else {
+                        registry.add_prompt({
+                            .name = "dynamic_prompt",
+                            .title = "Dynamic prompt",
+                            .description = "A prompt registered at runtime.",
+                            .arguments = {},
+                            .render = [](const Json&) {
+                                return Json{{"messages",
+                                             Json::array({{{"role", "user"},
+                                                           {"content", {{"type", "text"},
+                                                                        {"text", "dynamic"}}}}})}};
+                            },
+                        });
+                        registry.add_resource({
+                            .uri = "demo://dynamic",
+                            .name = "dynamic",
+                            .title = "Dynamic resource",
+                            .description = "A resource registered at runtime.",
+                            .mime_type = "text/plain",
+                            .read = [] {
+                                return cppmcp::examples::ResourceContent{
+                                    "dynamic", std::nullopt, std::nullopt};
+                            },
+                        });
+                    }
+                    registered = !registered;
+                }
+            });
+        }
 
         if (sdk_listener) {
             std::cerr << "http_server: using SDK listener (tools only; no prompts/resources/tasks)\n";
             server.run_http(options);
             notifier.request_stop();
+            ticker.request_stop();
+            churn.request_stop();
             return EXIT_SUCCESS;
         }
 
@@ -329,7 +403,9 @@ int main(int argc, char** argv) {
                                     return;
                                 }
                                 if (rpc->method != "prompts/get" &&
-                                    rpc->method != "resources/read") {
+                                    rpc->method != "resources/read" &&
+                                    rpc->method != "resources/subscribe" &&
+                                    rpc->method != "resources/unsubscribe") {
                                     if (auto handled = registry.try_handle(*rpc)) {
                                     exchange->respond(200, {{"Content-Type", "application/json"}},
                                                       cppmcp::core::serialize_message(*handled));
@@ -350,7 +426,12 @@ int main(int argc, char** argv) {
         while (!g_stop) std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         notifier.request_stop();
+        ticker.request_stop();
+        churn.request_stop();
         door.stop();
+        if (notifier.joinable()) notifier.join();
+        if (ticker.joinable()) ticker.join();
+        if (churn.joinable()) churn.join();
         registry.shutdown();
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {
