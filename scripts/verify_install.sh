@@ -11,3 +11,8 @@ cmake -S "$ROOT/tests/install_consumer" -B "$TMP/consumer" \
   -DCMAKE_PREFIX_PATH="$TMP/install"
 cmake --build "$TMP/consumer" --parallel
 "$TMP/consumer/cppmcp_install_consumer"
+
+cmake -S "$ROOT/tests/api_consumer" -B "$TMP/api-consumer" \
+  -DCMAKE_PREFIX_PATH="$TMP/install"
+cmake --build "$TMP/api-consumer" --parallel
+"$TMP/api-consumer/cppmcp_api_consumer"

@@ -41,12 +41,13 @@ cppmcp::core::Request call() {
 void register_tool(cppmcp::Server& server) {
     cppmcp::ToolDefinition tool;
     tool.name = "confirm";
-    server.add_tool(std::move(tool), [](const Json&, const Json&, cppmcp::ToolContext& context) {
+    server.add_tool(std::move(tool), [](const Json&, const Json&, cppmcp::ToolContext& context)
+                                           -> cppmcp::ToolHandlerResult {
         if (context.input_responses().empty()) {
-            return cppmcp::ToolResult::input_required(input_requests(), {{"checkpoint", 7}}).to_json();
+            return cppmcp::ToolResult::input_required(input_requests(), {{"checkpoint", 7}});
         }
         return cppmcp::ToolResult::structured({{"state", context.state()},
-                                               {"response", context.input_responses().at("confirm")}}).to_json();
+                                               {"response", context.input_responses().at("confirm")}});
     });
 }
 
@@ -223,15 +224,15 @@ void test_mrtr_client() {
 
     cppmcp::ToolDefinition pending;
     pending.name = "confirm";
-    server.add_tool(pending, [](const Json&, const Json&, cppmcp::ToolContext& context) {
-        return context.state().value("done", false)
-            ? cppmcp::ToolResult::structured(true).to_json()
-            : cppmcp::ToolResult::input_required(Json::object(), {{"done", true}}).to_json();
+    server.add_tool(pending, [](const Json&, const Json&, cppmcp::ToolContext& context)
+                               -> cppmcp::ToolHandlerResult {
+        if (context.state().value("done", false)) return cppmcp::ToolResult::structured(true);
+        return cppmcp::ToolResult::input_required(Json::object(), {{"done", true}});
     });
     CPPMCP_CHECK(run_client(server, {})["structuredContent"] == true);
 
     server.add_tool(pending, [](const Json&, const Json&, cppmcp::ToolContext&) {
-        return cppmcp::ToolResult::input_required(input_requests()).to_json();
+        return cppmcp::ToolResult::input_required(input_requests());
     });
     options.max_rounds = 1;
     bool limited = false;
@@ -247,12 +248,14 @@ void test_elicit_url() {
     cppmcp::Server server;
     cppmcp::ToolDefinition tool;
     tool.name = "confirm";
-    server.add_tool(tool, [](const Json&, const Json&, cppmcp::ToolContext& context) {
-        return context.input_responses().empty()
-            ? cppmcp::ToolResult::input_required({{"authorize", {{"method", "elicitation/create"},
+    server.add_tool(tool, [](const Json&, const Json&, cppmcp::ToolContext& context)
+                              -> cppmcp::ToolHandlerResult {
+        if (context.input_responses().empty()) {
+            return cppmcp::ToolResult::input_required({{"authorize", {{"method", "elicitation/create"},
                 {"params", {{"mode", "url"}, {"message", "Authorize"},
-                             {"url", "https://example.test/authorize"}}}}}}).to_json()
-            : cppmcp::ToolResult::structured(true).to_json();
+                             {"url", "https://example.test/authorize"}}}}}});
+        }
+        return cppmcp::ToolResult::structured(true);
     });
     cppmcp::Client::CallToolOptions options;
     options.allow_url_elicitation = true;
@@ -278,10 +281,13 @@ void test_mrtr_generic() {
     cppmcp::Server server;
     cppmcp::ToolDefinition tool;
     tool.name = "confirm";
-    server.add_tool(tool, [](const Json&, const Json&, cppmcp::ToolContext& context) {
-        return context.input_responses().empty()
-            ? cppmcp::ToolResult::input_required({{"roots", {{"method", "roots/list"}, {"params", Json::object()}}}}).to_json()
-            : cppmcp::ToolResult::structured(context.input_responses()["roots"]["roots"]).to_json();
+    server.add_tool(tool, [](const Json&, const Json&, cppmcp::ToolContext& context)
+                              -> cppmcp::ToolHandlerResult {
+        if (context.input_responses().empty()) {
+            return cppmcp::ToolResult::input_required(
+                {{"roots", {{"method", "roots/list"}, {"params", Json::object()}}}});
+        }
+        return cppmcp::ToolResult::structured(context.input_responses()["roots"]["roots"]);
     });
     cppmcp::Client::CallToolOptions options;
     options.client_capabilities = {{"roots", Json::object()}};

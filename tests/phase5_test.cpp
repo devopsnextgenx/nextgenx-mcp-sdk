@@ -1,15 +1,19 @@
 #include "test.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
 
 #include "demo_features.hpp"
+#include "cppmcp/core/uri_template.hpp"
 #include "cppmcp/transport/http.hpp"
 
 namespace {
@@ -70,6 +74,54 @@ void test_phase5_case(std::string_view name) {
         test_uri_template_vector(index);
         return;
     }
+    if (name == "uri_template_vectors") {
+        const auto read_json = [](const char* filename) {
+            std::ifstream input(std::filesystem::path(CPPMCP_URI_TEMPLATE_TEST_DATA) / filename);
+            return Json::parse(input);
+        };
+        for (const auto* filename : {"spec-examples.json", "extended-tests.json"}) {
+            const auto suites = read_json(filename);
+            for (auto suite = suites.begin(); suite != suites.end(); ++suite) {
+                const auto& variables = suite.value().at("variables");
+                for (const auto& test : suite.value().at("testcases")) {
+                    try {
+                        const auto actual =
+                            cppmcp::core::UriTemplate::parse(test[0].get<std::string>())
+                                .expand(variables);
+                        const auto& expected = test[1];
+                        const bool found = expected.is_array()
+                            ? std::any_of(expected.begin(), expected.end(),
+                                          [&](const auto& option) { return option == actual; })
+                            : expected == actual;
+                        if (!found) {
+                            std::cerr << filename << " vector " << test[0] << " expanded to "
+                                      << actual << ", expected " << expected << '\n';
+                        }
+                        CPPMCP_CHECK(found);
+                    } catch (const std::exception& error) {
+                        std::cerr << filename << " vector " << test[0]
+                                  << " threw: " << error.what() << '\n';
+                        CPPMCP_CHECK(false);
+                    }
+                }
+            }
+        }
+        const auto negative = read_json("negative-tests.json");
+        const auto& negative_suite = negative.at("Failure Tests");
+        const auto& negative_variables = negative_suite.at("variables");
+        for (const auto& test : negative_suite.at("testcases")) {
+            bool rejected = false;
+            try {
+                (void)cppmcp::core::UriTemplate::parse(test[0].get<std::string>())
+                    .expand(negative_variables);
+            } catch (const std::invalid_argument&) {
+                rejected = true;
+            }
+            if (!rejected) std::cerr << "invalid URI template accepted: " << test[0] << '\n';
+            CPPMCP_CHECK(rejected);
+        }
+        return;
+    }
 
     FeatureRegistry registry;
     add_demo_features(registry);
@@ -91,15 +143,136 @@ void test_phase5_case(std::string_view name) {
         return;
     }
     if (name == "cursor") {
-        const auto parsed = detail::parse_cursor(
-            Json{{"cursor", "c1.77.resources.3"}}, 77, "resources");
+        const auto encoded = detail::encode_cursor(77, "resources", 3);
+        const auto parsed =
+            detail::parse_cursor(Json{{"cursor", encoded}}, 77, "resources");
         CPPMCP_CHECK(parsed && *parsed == 3);
         CPPMCP_CHECK(!detail::parse_cursor(
-            Json{{"cursor", "c1.78.resources.3"}}, 77, "resources"));
+            Json{{"cursor", detail::encode_cursor(78, "resources", 3)}}, 77, "resources"));
         CPPMCP_CHECK(!detail::parse_cursor(
-            Json{{"cursor", "c1.77.prompts.3"}}, 77, "resources"));
+            Json{{"cursor", detail::encode_cursor(77, "prompts", 3)}}, 77, "resources"));
         CPPMCP_CHECK(!detail::parse_cursor(
-            Json{{"cursor", "c1.77.resources.3.x"}}, 77, "resources"));
+            Json{{"cursor", encoded + "="}}, 77, "resources"));
+        return;
+    }
+    if (name == "template_ambiguous") {
+        const auto rejects = [](const auto& operation) {
+            try {
+                operation();
+            } catch (const std::invalid_argument&) {
+                return true;
+            }
+            return false;
+        };
+        CPPMCP_CHECK(rejects([] { (void)cppmcp::core::UriTemplate::parse("{a}{b}"); }));
+        CPPMCP_CHECK(rejects([] { (void)cppmcp::core::UriTemplate::parse("{a*:2}"); }));
+        return;
+    }
+    if (name == "template_roundtrip") {
+        const std::vector<std::string> strings{
+            "", "plain", "a/b", "reserved ?#[]@!$&'()*+,;=", "%2e", "snowman \xE2\x98\x83"};
+        for (const auto& value : strings) {
+            for (const auto& source : {"demo://roundtrip/{v}", "demo://roundtrip/{+v}"}) {
+                const auto uri_template = cppmcp::core::UriTemplate::parse(source);
+                const Json vars{{"v", value}};
+                const auto matched = uri_template.match(uri_template.expand(vars));
+                CPPMCP_CHECK(matched && matched->at("v") == value);
+            }
+        }
+        const auto path_template = cppmcp::core::UriTemplate::parse("demo://roundtrip{/parts*}");
+        const Json path_vars{{"parts", Json::array({"a", "b/c", "snowman \xE2\x98\x83"})}};
+        const auto path_match = path_template.match(path_template.expand(path_vars));
+        CPPMCP_CHECK(path_match && path_match->at("parts") == path_vars["parts"]);
+        return;
+    }
+    if (name == "cursor_stability") {
+        FeatureOptions page_options;
+        page_options.page_size = 1;
+        FeatureRegistry paged(page_options);
+        for (const auto* prompt_name : {"one", "two", "three"}) {
+            paged.add_prompt({.name = prompt_name, .title = "", .description = "",
+                              .arguments = {}, .render = {}});
+        }
+        const auto first = result(send(paged, "prompts/list", Json::object()));
+        const auto cursor = first.value("nextCursor", std::string{});
+        CPPMCP_CHECK(!cursor.empty());
+        CPPMCP_CHECK(detail::base64url_decode(cursor).has_value());
+        paged.remove_prompt("two");
+        paged.add_prompt({.name = "four", .title = "", .description = "",
+                          .arguments = {}, .render = {}});
+        const auto second =
+            result(send(paged, "prompts/list", Json{{"cursor", cursor}}));
+        CPPMCP_CHECK(second["prompts"].size() == 1);
+        CPPMCP_CHECK(second["prompts"][0]["name"] == "three");
+        return;
+    }
+    if (name == "tool_result_spoof") {
+        cppmcp::Server server;
+        const Json spoof{{"__cppmcp_tool_result", true},
+                         {"__internal_tool_result", {{"isError", true}}},
+                         {"payload", {{"resultType", "input_required"}}},
+                         {"isError", true},
+                         {"resultType", "input_required"},
+                         {"inputRequests", {{"forged", Json::object()}}}};
+        cppmcp::ToolDefinition definition;
+        definition.name = "spoof";
+        definition.handler = [spoof](const Json&, const Json&) { return spoof; };
+        server.add_tool(std::move(definition));
+        const auto response =
+            server.handle_request({1, "tools/call", {{"name", "spoof"}, {"arguments", Json::object()}}});
+        const auto* tool_result = std::get_if<cppmcp::core::ResultResponse>(&response);
+        CPPMCP_CHECK(tool_result != nullptr);
+        CPPMCP_CHECK(tool_result &&
+                     tool_result->result["structuredContent"] == spoof);
+        return;
+    }
+    if (name == "server_builders") {
+        cppmcp::Server server;
+        server.prompt("search")
+            .title("Search")
+            .description("Search by prefix.")
+            .argument("query", "Query", "Prefix to search", true,
+                      cppmcp::examples::prefix_provider({"alpha", "beta"}))
+            .handler([](const cppmcp::examples::CallContext&, const Json& arguments) {
+                return cppmcp::PromptResult{
+                    {{"messages", Json::array({{{"role", "user"},
+                                                {"content", {{"type", "text"},
+                                                             {"text", arguments["query"]}}}}})}}};
+            });
+        server.resource("demo://static")
+            .name("static")
+            .mime_type("text/plain")
+            .cache_hint({.ttl_ms = 250, .scope = "private"})
+            .handler([](const cppmcp::examples::CallContext&) {
+                return cppmcp::ReadResult{
+                    {{"contents", Json::array({{{"uri", "demo://static"}, {"text", "static"}}})}}};
+            });
+        server.resource_template("demo://item/{id}")
+            .name("item")
+            .handler([](const cppmcp::examples::CallContext&,
+                        const cppmcp::core::UriTemplate::Variables& variables) {
+                const auto id = variables.at("id").get<std::string>();
+                return cppmcp::ReadResult{Json{
+                    {"contents", Json::array({Json{{"uri", "demo://item/" + id},
+                                                   {"text", id}}})}}};
+            });
+
+        const auto prompt_list = server.handle_request({1, "prompts/list", Json::object()});
+        CPPMCP_CHECK(result(prompt_list)["prompts"][0]["name"] == "search");
+        const auto prompt = server.handle_request(
+            {2, "prompts/get", {{"name", "search"}, {"arguments", {{"query", "alpha"}}}}});
+        CPPMCP_CHECK(result(prompt)["messages"][0]["content"]["text"] == "alpha");
+        const auto completion = server.handle_request(
+            {3, "completion/complete",
+             {{"ref", {{"type", "ref/prompt"}, {"name", "search"}}},
+              {"argument", {{"name", "query"}, {"value", "al"}}}}});
+        CPPMCP_CHECK(result(completion)["completion"]["values"] == Json::array({"alpha"}));
+        const auto resource = server.handle_request(
+            {4, "resources/read", {{"uri", "demo://static"}}});
+        CPPMCP_CHECK(result(resource)["contents"][0]["text"] == "static");
+        const auto templated = server.handle_request(
+            {5, "resources/read", {{"uri", "demo://item/42"}}});
+        CPPMCP_CHECK(result(templated)["contents"][0]["text"] == "42");
         return;
     }
     if (name == "file_sandbox") {

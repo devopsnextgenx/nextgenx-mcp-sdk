@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <thread>
+#include <utility>
 
 #include "cppmcp/server.hpp"
 
@@ -30,7 +31,7 @@ inline void add_phase4_tools(Server& server) {
             return ToolResult::structured(
                 {{"city", args.value("city", std::string{})},
                  {"temp_c", 21},
-                 {"conditions", "clear"}}).to_json();
+                 {"conditions", "clear"}});
         },
     });
 
@@ -106,27 +107,27 @@ inline void add_phase4_tools(Server& server) {
                          {"additionalProperties", false}},
         .annotations = ToolAnnotation{.destructive_hint = true},
                 .meta = Json::object(),
-        .handler = [](const Json& args, const Json& params) {
+        .handler = [](const Json& args, const Json& params) -> ToolHandlerResult {
             const auto responses = params.value("inputResponses", Json::object());
             const auto response = responses.find("confirm_delete");
             if (response == responses.end()) {
-                return Json{{"resultType", "input_required"},
-                            {"inputRequests",
-                             {{"confirm_delete",
-                               {{"method", "elicitation/create"},
-                                {"params", {{"mode", "form"},
-                                             {"message", "Confirm project deletion"},
-                                             {"requestedSchema",
-                                              {{"type", "object"},
-                                               {"properties", {{"confirm", {{"type", "boolean"}}}}},
-                                               {"required", {"confirm"}}}}}}}}}}};
+                Json requests = Json::object();
+                requests["confirm_delete"] = {
+                    {"method", "elicitation/create"},
+                    {"params", {{"mode", "form"},
+                                {"message", "Confirm project deletion"},
+                                {"requestedSchema",
+                                 {{"type", "object"},
+                                  {"properties", {{"confirm", {{"type", "boolean"}}}}},
+                                  {"required", {"confirm"}}}}}}};
+                return InputRequired{std::move(requests), Json::object()};
             }
             const auto accepted = response->is_object() &&
                                  response->value("action", std::string{}) == "accept" &&
                                  response->value("content", Json::object())
                                          .value("confirm", false);
             const auto project = args.value("project", std::string{});
-            return ToolResult::text(accepted ? "deleted " + project : "not deleted").to_json();
+            return ToolResult::text(accepted ? "deleted " + project : "not deleted");
         },
     });
 

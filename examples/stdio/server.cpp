@@ -154,7 +154,7 @@ int main(int argc, char** argv) {
             auto response = server.handle_message(request, &context);
             context.finish();
             if (auto* result = std::get_if<cppmcp::core::ResultResponse>(&response)) {
-                registry.augment_discover(result->result);  // advertise prompts/resources/tasks/...
+                registry.augment_discover(result->result);
             }
             if (std::holds_alternative<cppmcp::core::ResultResponse>(response) ||
                 std::holds_alternative<cppmcp::core::ErrorResponse>(response)) {

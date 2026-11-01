@@ -73,6 +73,7 @@ set(CPPMCP_SOURCES
     src/json_rpc.cpp
     src/json_schema.cpp
     src/request_state.cpp
+    src/uri_template.cpp
     src/version.cpp
     src/connection.cpp
 )
@@ -421,6 +422,7 @@ if(CPPMCP_BUILD_TESTS)
     )
     target_compile_definitions(cppmcp_core_tests PRIVATE
         CPPMCP_SCHEMA_PATH="${CMAKE_CURRENT_SOURCE_DIR}/schema/2026-07-28/schema.json"
+        CPPMCP_URI_TEMPLATE_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/tests/data/uritemplate-test"
     )
         foreach(test_name IN ITEMS
             json_rpc versions schema_contract schema_register tool_name_rule regex_redos_budget
@@ -466,6 +468,8 @@ if(CPPMCP_BUILD_TESTS)
     foreach(test_name IN ITEMS
             uri_template template_match cursor file_sandbox symlink completion cache_hint
             registry_churn subscription_limit list_changed mrtr_prompt mrtr_resource
+            template_ambiguous template_roundtrip cursor_stability tool_result_spoof
+            uri_template_vectors server_builders
             mcp_name_uri_encoding
             uri_template_vector_01 uri_template_vector_02 uri_template_vector_03
             uri_template_vector_04 uri_template_vector_05 uri_template_vector_06
@@ -486,4 +490,7 @@ if(CPPMCP_BUILD_TESTS)
         add_test(NAME cppmcp_phase5_${test_name}_test
             COMMAND cppmcp_core_tests phase5_${test_name})
     endforeach()
+    add_test(NAME api_consumer COMMAND bash
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/verify_install.sh" "${CMAKE_BINARY_DIR}")
+    set_tests_properties(api_consumer PROPERTIES TIMEOUT 180)
 endif()

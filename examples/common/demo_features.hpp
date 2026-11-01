@@ -303,8 +303,8 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .title = "City report",
         .description = "Weather report for a known city.",
         .mime_type = "application/json",
-        .read = [](const std::map<std::string, std::string>& vars) -> std::optional<ResourceContent> {
-            const auto* city = demo::find_city(vars.at("city"));
+        .read = [](const core::UriTemplate::Variables& vars) -> std::optional<ResourceContent> {
+            const auto* city = demo::find_city(vars.at("city").get<std::string>());
             if (!city) return std::nullopt;
             return ResourceContent{demo::city_json(*city).dump(), std::nullopt, std::nullopt};
         },
@@ -315,9 +315,9 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .title = "User profile",
         .description = "A profile for a user ID, optionally formatted as JSON.",
         .mime_type = "text/plain",
-        .read = [](const std::map<std::string, std::string>& vars)
+        .read = [](const core::UriTemplate::Variables& vars)
             -> std::optional<ResourceContent> {
-            const auto id = vars.at("id");
+            const auto id = vars.at("id").get<std::string>();
             if (const auto format = vars.find("format");
                 format != vars.end() && format->second == "json") {
                 return ResourceContent{Json{{"id", id}, {"name", "User " + id}}.dump(),
@@ -337,9 +337,9 @@ inline void add_demo_features(FeatureRegistry& registry) {
         .title = "Note",
         .description = "Numbered notes 1-3.",
         .mime_type = "text/plain",
-        .read = [](const std::map<std::string, std::string>& vars) -> std::optional<ResourceContent> {
+        .read = [](const core::UriTemplate::Variables& vars) -> std::optional<ResourceContent> {
             static const std::array<const char*, 3> notes{"First note.", "Second note.", "Third note."};
-            const auto& id = vars.at("id");
+            const auto id = vars.at("id").get<std::string>();
             if (id.size() != 1 || id[0] < '1' || id[0] > '3') return std::nullopt;
             return ResourceContent{std::string(notes[static_cast<std::size_t>(id[0] - '1')]),
                                    std::nullopt, std::nullopt};
@@ -353,6 +353,30 @@ inline void add_demo_features(FeatureRegistry& registry) {
     registry.add_resource_completion("demo://notes/{id}", "id", [](const std::string& typed, const Json&) {
         return prefix_filter({"1", "2", "3"}, typed);
     });
+
+    const auto add_operator_resource = [&registry](std::string uri_template) {
+        registry.add_resource_template({
+            .uri_template = std::move(uri_template),
+            .name = "uri_template_match",
+            .title = "URI template match",
+            .description = "Return the variables matched by an RFC 6570 URI template.",
+            .mime_type = "application/json",
+            .read = [](const core::UriTemplate::Variables& variables) {
+                Json result = Json::object();
+                for (const auto& [name, value] : variables) result[name] = value;
+                return std::optional<ResourceContent>(
+                    ResourceContent{result.dump(), std::nullopt, "application/json"});
+            },
+        });
+    };
+    add_operator_resource("demo://m/simple/{a}/{b}");
+    add_operator_resource("demo://m/reserved/{+p}");
+    add_operator_resource("demo://m/frag{#f}");
+    add_operator_resource("demo://m/label{.x}");
+    add_operator_resource("demo://m/path{/segs*}");
+    add_operator_resource("demo://m/semi{;k,v}");
+    add_operator_resource("demo://m/query{?q,limit}");
+    add_operator_resource("demo://m/cont?fixed=1{&extra}");
 }
 
 }  // namespace cppmcp::examples

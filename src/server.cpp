@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "cppmcp/core/log.hpp"
+#include "cppmcp/server/features.hpp"
 #include "cppmcp/transport/http.hpp"
 
 namespace cppmcp {
@@ -141,7 +142,14 @@ Server::Server(ServerInfo info, core::SchemaValidationLimits schema_limits)
       schema_limits_(schema_limits),
       request_state_codec_(std::make_shared<core::HmacRequestStateCodec>(
           std::vector<core::RequestStateKey>{})),
-      subscriptions_(std::make_shared<transport::SubscriptionRegistry>()) {}
+      subscriptions_(std::make_shared<transport::SubscriptionRegistry>()),
+      feature_registry_(std::make_shared<examples::FeatureRegistry>()) {
+    feature_registry_->set_tool_executor(examples::make_tool_executor(*this));
+    feature_registry_->set_list_changed_notifier([this](const std::string& kind) {
+        if (kind == "prompts") notify_prompts_list_changed();
+        else notify_resources_list_changed();
+    });
+}
 
 Server::Server(ServerInfo info, ServerOptions options)
     : info_(std::move(info)),
@@ -153,10 +161,16 @@ Server::Server(ServerInfo info, ServerOptions options)
           options.max_request_state_bytes)),
       subject_provider_(std::move(options.subject_provider)),
       max_mrtr_rounds_(options.max_mrtr_rounds),
-      subscriptions_(std::make_shared<transport::SubscriptionRegistry>()) {
+      subscriptions_(std::make_shared<transport::SubscriptionRegistry>()),
+      feature_registry_(std::make_shared<examples::FeatureRegistry>()) {
     if (max_mrtr_rounds_ == 0) {
         throw std::invalid_argument("max_mrtr_rounds must be greater than zero");
     }
+    feature_registry_->set_tool_executor(examples::make_tool_executor(*this));
+    feature_registry_->set_list_changed_notifier([this](const std::string& kind) {
+        if (kind == "prompts") notify_prompts_list_changed();
+        else notify_resources_list_changed();
+    });
 }
 
 void Server::notify_tools_list_changed() {
@@ -172,7 +186,24 @@ void Server::notify_resources_list_changed() {
 }
 
 void Server::notify_resource_updated(std::string uri) {
+    if (feature_registry_) feature_registry_->resource_updated(uri);
     subscriptions_->notify_resource_updated(uri);
+}
+
+examples::FeatureRegistry& Server::features() {
+    return *feature_registry_;
+}
+
+examples::PromptBuilder Server::prompt(std::string name) {
+    return examples::PromptBuilder(features(), std::move(name));
+}
+
+examples::ResourceBuilder Server::resource(std::string uri) {
+    return examples::ResourceBuilder(features(), std::move(uri));
+}
+
+examples::ResourceTemplateBuilder Server::resource_template(std::string uri_template) {
+    return examples::ResourceTemplateBuilder(features(), std::move(uri_template));
 }
 
 ToolBuilder::ToolBuilder(ToolDefinition tool) : tool_(std::move(tool)) {}
@@ -520,9 +551,13 @@ std::vector<HeaderParamDefinition> Server::tool_header_params(const std::string&
 }
 
 nlohmann::json Server::discover() const {
-    return {{"protocolVersions", nlohmann::json::array({"2026-07-28", "2025-11-25"})},
-            {"capabilities", {{"tools", {{"listChanged", true}}}, {"logging", nlohmann::json::object()}}},
-            {"serverInfo", {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
+    nlohmann::json result = {
+        {"protocolVersions", nlohmann::json::array({"2026-07-28", "2025-11-25"})},
+        {"capabilities", {{"tools", {{"listChanged", true}}},
+                          {"logging", nlohmann::json::object()}}},
+        {"serverInfo", {{"name", info_.name}, {"title", info_.title}, {"version", info_.version}}}};
+    feature_registry_->augment_discover(result);
+    return result;
 }
 
 std::string Server::request_protocol_version(const core::Json& params) const {
@@ -576,13 +611,14 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             std::lock_guard<std::mutex> lock(mutex_);
             legacy_client_capabilities_ = request.params.value("capabilities", nlohmann::json::object());
         }
-        return core::ResultResponse{request.id,
-                                    {{"protocolVersion", "2025-11-25"},
-                                     {"capabilities", {{"tools", {{"listChanged", true}}},
-                                                        {"logging", nlohmann::json::object()}}},
-                                     {"serverInfo", {{"name", info_.name},
-                                                     {"title", info_.title},
-                                                     {"version", info_.version}}}}};
+        nlohmann::json result = {{"protocolVersion", "2025-11-25"},
+                                 {"capabilities", {{"tools", {{"listChanged", true}}},
+                                                   {"logging", nlohmann::json::object()}}},
+                                 {"serverInfo", {{"name", info_.name},
+                                                 {"title", info_.title},
+                                                 {"version", info_.version}}}};
+        feature_registry_->augment_discover(result);
+        return core::ResultResponse{request.id, std::move(result)};
     }
 
     if (method == "ping") {
@@ -633,6 +669,12 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
     }
     if (request_handler) {
         return handle_registered_request(request, context, request_handler);
+    }
+
+    if (feature_registry_) {
+        if (auto feature_result = feature_registry_->try_handle(request, context)) {
+            return std::move(*feature_result);
+        }
     }
 
     if (method == "tools/call") {
@@ -782,7 +824,7 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
                                  {"isError", true}});
             }
         }
-        nlohmann::json result;
+        ToolHandlerResult result;
         try {
             if (context_handler) {
                 result = context_handler(arguments, request.params, tool_context);
@@ -797,21 +839,18 @@ core::Message Server::handle_request(const core::Request& request, ToolContext* 
             return finalize({{"content", std::move(content)}, {"isError", true}});
         }
 
-        const bool explicit_tool_result = result.is_object() &&
-                                          result.value("__cppmcp_tool_result", false) &&
-                                          result.contains("payload") && result["payload"].is_object();
         nlohmann::json payload;
         bool is_error = false;
-        if (explicit_tool_result) {
-            payload = std::move(result["payload"]);
-            is_error = result.value("isError", false);
-        } else if (result.is_object() &&
-                   result.value("resultType", std::string{}) == "input_required") {
-            payload = std::move(result);
+        if (auto* tool_result = std::get_if<ToolResult>(&result)) {
+            payload = std::move(tool_result->payload);
+            is_error = tool_result->is_error;
+        } else if (const auto* input_required = std::get_if<InputRequired>(&result)) {
+            payload = input_required->to_json();
         } else {
+            auto raw_result = std::move(std::get<nlohmann::json>(result));
             payload = {{"content", nlohmann::json::array(
-                                        {{{"type", "text"}, {"text", result.dump()}}})},
-                       {"structuredContent", result}};
+                                        {{{"type", "text"}, {"text", raw_result.dump()}}})},
+                       {"structuredContent", std::move(raw_result)}};
         }
         if (payload.value("resultType", std::string{}) == "input_required") {
             try {

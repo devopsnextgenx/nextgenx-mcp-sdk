@@ -28,6 +28,13 @@ class McpHttpHandler;
 class SubscriptionRegistry;
 }  // namespace transport
 
+namespace examples {
+class FeatureRegistry;
+class PromptBuilder;
+class ResourceBuilder;
+class ResourceTemplateBuilder;
+}  // namespace examples
+
 struct ServerInfo {
     std::string name;
     std::string title;
@@ -63,6 +70,61 @@ struct HeaderParamDefinition {
     std::string type = "string";
 };
 
+struct InputRequired {
+    nlohmann::json input_requests = nlohmann::json::object();
+    nlohmann::json private_state = nlohmann::json::object();
+
+    nlohmann::json to_json() const {
+        return {{"resultType", "input_required"},
+                {"inputRequests", input_requests},
+                {"privateState", private_state}};
+    }
+};
+
+struct PromptResult {
+    nlohmann::json payload = nlohmann::json::object();
+};
+
+struct ReadResult {
+    nlohmann::json payload = nlohmann::json::object();
+};
+
+struct ToolResult {
+    nlohmann::json payload;
+    bool is_error = false;
+
+    static ToolResult text(std::string text) {
+        return ToolResult{nlohmann::json{{"content", nlohmann::json::array(
+                                                      {{{"type", "text"},
+                                                        {"text", std::move(text)}}})}},
+                          false};
+    }
+    static ToolResult structured(nlohmann::json value, bool also_text = true) {
+        auto payload = nlohmann::json::object();
+        if (also_text) {
+            payload["content"] = nlohmann::json::array(
+                {{{"type", "text"}, {"text", value.dump()}}});
+        } else {
+            payload["content"] = nlohmann::json::array();
+        }
+        payload["structuredContent"] = std::move(value);
+        return ToolResult{std::move(payload), false};
+    }
+    static ToolResult error_text(std::string error) {
+        return ToolResult{nlohmann::json{{"content", nlohmann::json::array(
+                                                      {{{"type", "text"},
+                                                        {"text", std::move(error)}}})}},
+                          true};
+    }
+    static InputRequired input_required(nlohmann::json input_requests,
+                                       nlohmann::json private_state = nlohmann::json::object()) {
+        return {std::move(input_requests), std::move(private_state)};
+    }
+};
+
+using ToolHandlerResult = std::variant<nlohmann::json, ToolResult, InputRequired>;
+class ToolContext;
+
 class ToolBuilder;
 
 struct ToolDefinition {
@@ -73,7 +135,7 @@ struct ToolDefinition {
     nlohmann::json output_schema = nlohmann::json::object();
     ToolAnnotation annotations;
     nlohmann::json meta = nlohmann::json::object();
-    std::function<nlohmann::json(const nlohmann::json&, const nlohmann::json&)> handler;
+    std::function<ToolHandlerResult(const nlohmann::json&, const nlohmann::json&)> handler;
 
     ToolBuilder header_param(std::string name, bool required = true) &;
     ToolBuilder header_param(std::string name, bool required = true) &&;
@@ -149,49 +211,10 @@ private:
     std::string request_subject_ = "anonymous";
 };
 
-using ContextToolHandler =
-    std::function<nlohmann::json(const nlohmann::json&, const nlohmann::json&, ToolContext&)>;
+using ContextToolHandler = std::function<ToolHandlerResult(
+    const nlohmann::json&, const nlohmann::json&, ToolContext&)>;
 using RequestHandler =
     std::function<core::Message(const core::Request&, ToolContext&)>;
-
-struct ToolResult {
-    nlohmann::json payload;
-    bool is_error = false;
-
-    static ToolResult text(std::string text) {
-        return ToolResult{nlohmann::json{{"content", nlohmann::json::array(
-                                                      {{{"type", "text"},
-                                                        {"text", std::move(text)}}})}},
-                          false};
-    }
-    static ToolResult structured(nlohmann::json value, bool also_text = true) {
-        auto payload = nlohmann::json::object();
-        if (also_text) {
-            payload["content"] = nlohmann::json::array(
-                {{{"type", "text"}, {"text", value.dump()}}});
-        } else {
-            payload["content"] = nlohmann::json::array();
-        }
-        payload["structuredContent"] = std::move(value);
-        return ToolResult{std::move(payload), false};
-    }
-    static ToolResult error_text(std::string error) {
-        return ToolResult{nlohmann::json{{"content", nlohmann::json::array(
-                                                      {{{"type", "text"},
-                                                        {"text", std::move(error)}}})}},
-                          true};
-    }
-    nlohmann::json to_json() const {
-        return {{"__cppmcp_tool_result", true}, {"payload", payload}, {"isError", is_error}};
-    }
-    static ToolResult input_required(nlohmann::json input_requests,
-                                     nlohmann::json private_state = nlohmann::json::object()) {
-        return ToolResult{{{"resultType", "input_required"},
-                           {"inputRequests", std::move(input_requests)},
-                           {"privateState", std::move(private_state)}}, false};
-    }
-    operator nlohmann::json() const { return to_json(); }
-};
 
 class Server {
 public:
@@ -203,6 +226,10 @@ public:
     void add_tool(ToolDefinition tool, ContextToolHandler context_handler);
     void add_tool(ToolBuilder tool);
     void add_tool(ToolBuilder tool, ContextToolHandler context_handler);
+    examples::PromptBuilder prompt(std::string name);
+    examples::ResourceBuilder resource(std::string uri);
+    examples::ResourceTemplateBuilder resource_template(std::string uri_template);
+    examples::FeatureRegistry& features();
     void add_request_handler(std::string method, RequestHandler handler);
     void set_validate_output(bool enabled) noexcept;
     bool has_tool(const std::string& name) const;
@@ -251,6 +278,7 @@ private:
     std::size_t max_mrtr_rounds_ = 10;
     nlohmann::json legacy_client_capabilities_ = nlohmann::json::object();
     std::shared_ptr<transport::SubscriptionRegistry> subscriptions_;
+    std::shared_ptr<examples::FeatureRegistry> feature_registry_;
 
     friend class transport::McpHttpHandler;
 };
