@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "cppmcp/auth/auth_context.hpp"
+#include "cppmcp/auth/scope_authorization.hpp"
 #include "cppmcp/server.hpp"
 
 namespace cppmcp::transport {
@@ -103,6 +104,8 @@ struct OAuthResourceOptions {
     bool omit_resource_metadata_parameter = false;
     std::chrono::seconds jwks_min_refresh{10};
     bool filter_listings = false;
+    auth::ScopeSet required_scopes{"mcp:use"};
+    auth::ScopeHierarchy scope_hierarchy;
 };
 
 struct HttpHandlerOptions {

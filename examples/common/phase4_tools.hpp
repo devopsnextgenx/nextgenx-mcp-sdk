@@ -97,7 +97,7 @@ inline void add_phase4_tools(Server& server) {
         return Json{{"logged", true}};
     });
 
-    server.add_tool({
+    server.add_tool(ToolDefinition{
         .name = "delete_project",
         .title = "Delete project",
         .description = "Ask for confirmation before deleting a project.",
@@ -129,7 +129,11 @@ inline void add_phase4_tools(Server& server) {
             const auto project = args.value("project", std::string{});
             return ToolResult::text(accepted ? "deleted " + project : "not deleted");
         },
-    });
+    }.requires_scopes([](const auth::RequestView& request) {
+        return request.arguments.value("project", std::string{}) == "prod"
+                   ? auth::ScopeSet{"projects:admin"}
+                   : auth::ScopeSet{"projects:write"};
+    }));
 
     server.add_tool({
         .name = "loop_input",

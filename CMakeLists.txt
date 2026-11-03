@@ -470,7 +470,8 @@ if(CPPMCP_BUILD_TESTS)
             progress logging
             phase2_memory phase2_stdio
             client_prompts client_resources client_completion client_cache client_resubscribe
-            http_handler prm_handler_auth http_handler_mcp_param_stateless http_handler_mcp_param_types
+            http_handler prm_handler_auth scope_hierarchy scope_single_challenge
+            http_handler_mcp_param_stateless http_handler_mcp_param_types
             cancellation
             http_server_methods http_server_host_origin
             http_server_smuggling http_server_slowloris http_server_auth_route_bind

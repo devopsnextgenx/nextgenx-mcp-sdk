@@ -348,9 +348,7 @@ void test_prm_metadata_and_token_verifier() {
     CPPMCP_CHECK(Json::parse(prm->body)["authorization_servers"][0] ==
                   oauth.authorization_servers[0]);
 
-    HttpRequest missing_request;
-    missing_request.method = "POST";
-    missing_request.target = "/mcp";
+    auto missing_request = make_request("tools/list");
     auto missing = std::make_shared<MockExchange>(std::move(missing_request));
     handler.handle(missing);
     const auto* missing_challenge = response_header(missing->headers, "WWW-Authenticate");
@@ -386,6 +384,71 @@ void test_prm_metadata_and_token_verifier() {
     auto duplicate = std::make_shared<MockExchange>(std::move(duplicate_request));
     handler.handle(duplicate);
     CPPMCP_CHECK(duplicate->status == 400);
+}
+
+void test_scope_hierarchy() {
+    cppmcp::auth::ScopeHierarchy hierarchy;
+    hierarchy.add_implication("projects:admin", "projects:write");
+    hierarchy.add_implication("files:write", "files:read");
+    CPPMCP_CHECK(hierarchy.satisfies({"projects:admin"}, "projects:write"));
+    CPPMCP_CHECK(hierarchy.satisfies({"files:write"}, "files:read"));
+    CPPMCP_CHECK(!hierarchy.satisfies({"projects:write"}, "projects:admin"));
+    CPPMCP_CHECK(hierarchy.missing({"projects:admin"},
+                                   {"projects:write", "reports:read"}) ==
+                 cppmcp::auth::ScopeSet{"reports:read"});
+}
+
+void test_scope_single_challenge() {
+    Server server({"scope-test-server", "Scope test server", "1.0"});
+    bool handler_called = false;
+    server.add_tool(cppmcp::ToolDefinition{
+        .name = "export_report",
+        .title = "Export report",
+        .description = "Scope aggregation test.",
+        .input_schema = Json{{"type", "object"}, {"additionalProperties", false}},
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
+        .handler = [&](const Json&, const Json&) {
+            handler_called = true;
+            return Json{{"ok", true}};
+        },
+    }.requires_scopes({"reports:read", "files:write"}));
+
+    cppmcp::auth::AuthContext auth_context;
+    auth_context.issuer = "https://issuer.example";
+    auth_context.subject = "alice";
+    auth_context.client_id = "client";
+    auth_context.audience = {"https://resource.example/mcp"};
+    auth_context.scopes = {"mcp:use"};
+    auto verifier = std::make_shared<cppmcp::auth::StaticBearerAuthenticator>(
+        "scope-test-token", auth_context);
+    HttpHandlerOptions options;
+    options.token_verifier = verifier;
+    cppmcp::transport::OAuthResourceOptions oauth;
+    oauth.resource = "https://resource.example/mcp";
+    oauth.authorization_servers = {"https://issuer.example"};
+    McpHttpHandler handler(server, options, oauth);
+
+    auto request = make_request("tools/call",
+                                {{"name", "export_report"},
+                                 {"arguments", Json::object()}});
+    add_name_header(request, "export_report");
+    request.headers.emplace_back("Authorization", "Bearer scope-test-token");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+
+    const auto* challenge = response_header(exchange->headers, "WWW-Authenticate");
+    CPPMCP_CHECK(exchange->status == 403);
+    CPPMCP_CHECK(!handler_called);
+    CPPMCP_CHECK(challenge != nullptr);
+    if (challenge) {
+        CPPMCP_CHECK(challenge->find("error=\"insufficient_scope\"") != std::string::npos);
+        CPPMCP_CHECK(challenge->find("scope=\"files:write mcp:use reports:read\"") !=
+                     std::string::npos);
+        CPPMCP_CHECK(challenge->find("resource_metadata=") != std::string::npos);
+        CPPMCP_CHECK(std::count(challenge->begin(), challenge->end(), ',') == 0);
+    }
 }
 
 void test_http_handler_header_params_stateless() {

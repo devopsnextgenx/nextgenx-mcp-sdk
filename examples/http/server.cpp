@@ -48,6 +48,37 @@ void add_tools(cppmcp::Server& server) {
         .meta = Json::object(),
         .handler = [](const Json& args, const Json&) { return args.value("value", Json(nullptr)); },
     });
+    server.add_tool(cppmcp::ToolDefinition{
+        .name = "whoami",
+        .title = "Current principal",
+        .description = "Return the verified caller identity and granted scopes.",
+        .input_schema = Json{{"type", "object"}, {"additionalProperties", false}},
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
+        .handler = {},
+    }, [](const Json&, const Json&, cppmcp::ToolContext& context) {
+        const auto* principal = context.auth();
+        if (principal == nullptr) {
+            return Json{{"sub", "anonymous"}, {"client_id", ""}, {"scopes", Json::array()}};
+        }
+        return Json{{"sub", principal->subject},
+                    {"client_id", principal->client_id},
+                    {"scopes", std::vector<std::string>(principal->scopes.begin(),
+                                                        principal->scopes.end())}};
+    });
+    server.add_tool(cppmcp::ToolDefinition{
+        .name = "export_report",
+        .title = "Export report",
+        .description = "Export a report to the example files area.",
+        .input_schema = Json{{"type", "object"}, {"additionalProperties", false}},
+        .output_schema = Json::object(),
+        .annotations = cppmcp::ToolAnnotation{},
+        .meta = Json::object(),
+        .handler = [](const Json&, const Json&) {
+            return Json{{"exported", true}};
+        },
+    }.requires_scopes({"reports:read", "files:write"}));
     server.add_tool({
         .name = "add",
         .title = "Add",
@@ -387,6 +418,8 @@ int main(int argc, char** argv) {
             for (const auto& issuer : options.oauth->authorization_servers) {
                 validate_url(issuer, "--auth-issuer");
             }
+            options.oauth->scope_hierarchy.add_implication("projects:admin", "projects:write");
+            options.oauth->scope_hierarchy.add_implication("files:write", "files:read");
             options.handler.oauth = options.oauth;
             if (!introspection_url.empty()) {
                 if (introspection_client_id.empty() ||
@@ -446,10 +479,10 @@ int main(int argc, char** argv) {
         cppmcp::examples::add_phase4_tools(server);
         server.set_validate_output(options.validate_output);
 
-        cppmcp::examples::FeatureRegistry registry(feature_options);
+        auto& registry = server.features();
+        registry.configure(feature_options);
         cppmcp::examples::add_demo_features(registry);
-        registry.add_file_resource_template();
-        registry.set_tool_executor(cppmcp::examples::make_tool_executor(server));
+        registry.add_file_resource_template({"files:read"});
         server.add_request_handler("prompts/get", [&registry](const cppmcp::core::Request& request,
                                                                cppmcp::ToolContext& context) {
             return *registry.try_handle(request, &context);

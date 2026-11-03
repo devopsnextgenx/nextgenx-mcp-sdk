@@ -46,6 +46,7 @@
 
 #include "cppmcp/core/json_rpc.hpp"
 #include "cppmcp/core/uri_template.hpp"
+#include "cppmcp/auth/scope_authorization.hpp"
 #include "cppmcp/server.hpp"
 
 namespace cppmcp::examples {
@@ -75,6 +76,8 @@ struct PromptDefinition {
     std::string description;
     std::vector<PromptArgument> arguments;
     Json icons = Json::array();
+    auth::ScopeSet required_scopes{};
+    auth::DynamicScopeRequirements dynamic_scope_requirements{};
     // Returns {"description": "...", "messages": [...]}.
     std::function<Json(const Json& arguments)> render;
     std::function<Json(const Json& arguments, ToolContext& context)> context_render = {};
@@ -100,6 +103,8 @@ struct ResourceDefinition {
     Json icons = Json::array();
     Json annotations = Json::object();
     Json meta = Json::object();
+    auth::ScopeSet required_scopes{};
+    auth::DynamicScopeRequirements dynamic_scope_requirements{};
     std::optional<CacheHint> cache_hint = std::nullopt;
     std::function<std::variant<ReadResult, InputRequired>(ToolContext&)> typed_read = {};
 };
@@ -116,6 +121,8 @@ struct ResourceTemplateDefinition {
     Json icons = Json::array();
     Json annotations = Json::object();
     Json meta = Json::object();
+    auth::ScopeSet required_scopes{};
+    auth::DynamicScopeRequirements dynamic_scope_requirements{};
     std::optional<CacheHint> cache_hint = std::nullopt;
     std::function<std::variant<ReadResult, InputRequired>(
         ToolContext&, const core::UriTemplate::Variables&)>
@@ -620,6 +627,7 @@ public:
 
     // -- registration ------------------------------------------------------
     void add_prompt(PromptDefinition prompt) {
+        auth::validate_scope_set(prompt.required_scopes);
         {
             std::lock_guard lock(mutex_);
             const auto existing = std::find_if(prompts_.begin(), prompts_.end(), [&](const auto& item) {
@@ -638,6 +646,7 @@ public:
         emit_list_changed("prompts");
     }
     void add_resource(ResourceDefinition resource) {
+        auth::validate_scope_set(resource.required_scopes);
         {
             std::lock_guard lock(mutex_);
             const auto existing = std::find_if(resources_.begin(), resources_.end(),
@@ -654,6 +663,7 @@ public:
         emit_list_changed("resources");
     }
     void add_resource_template(ResourceTemplateDefinition tmpl) {
+        auth::validate_scope_set(tmpl.required_scopes);
         (void)core::UriTemplate::parse(tmpl.uri_template);
         {
             std::lock_guard lock(mutex_);
@@ -721,7 +731,7 @@ public:
         if (removed) emit_list_changed("resources");
         return removed;
     }
-    void add_file_resource_template() {
+    void add_file_resource_template(auth::ScopeSet required_scopes = {}) {
         if (options_.resource_root.empty()) return;
         auto provider = std::make_shared<FileResourceProvider>(
             options_.resource_root, options_.max_resource_bytes);
@@ -734,12 +744,141 @@ public:
             .read = [provider](const core::UriTemplate::Variables& vars) {
                 return provider->read(vars.at("path").get<std::string>());
             },
+            .required_scopes = std::move(required_scopes),
+            .dynamic_scope_requirements = {},
         });
     }
     void add_prompt_completion(std::string prompt, std::string argument, CompletionFn fn) {
         std::lock_guard lock(mutex_);
         prompt_completions_[{std::move(prompt), std::move(argument)}] = std::move(fn);
     }
+
+    [[nodiscard]] auth::ScopeSet required_prompt_scopes(
+        std::string_view name, const auth::RequestView& request) const {
+        PromptDefinition prompt;
+        {
+            std::lock_guard lock(mutex_);
+            const auto found = std::find_if(prompts_.begin(), prompts_.end(),
+                [&](const auto& item) { return item.name == name; });
+            if (found == prompts_.end()) return {};
+            prompt = *found;
+        }
+        auto scopes = prompt.required_scopes;
+        if (prompt.dynamic_scope_requirements) {
+            const auto dynamic = prompt.dynamic_scope_requirements(request);
+            auth::validate_scope_set(dynamic);
+            scopes.insert(dynamic.begin(), dynamic.end());
+        }
+        return scopes;
+    }
+
+    [[nodiscard]] auth::ScopeSet required_resource_scopes(
+        std::string_view uri, const auth::RequestView& request) const {
+        std::optional<ResourceDefinition> resource;
+        std::optional<ResourceTemplateDefinition> resource_template;
+        {
+            std::lock_guard lock(mutex_);
+            const auto found = std::find_if(resources_.begin(), resources_.end(),
+                [&](const auto& item) { return item.uri == uri; });
+            if (found != resources_.end()) {
+                resource = *found;
+            } else {
+                for (const auto& item : templates_) {
+                    if (const auto matched = core::UriTemplate::parse(item.uri_template).match(uri)) {
+                        resource_template = item;
+                        break;
+                    }
+                }
+            }
+        }
+        if (resource) {
+            auto scopes = resource->required_scopes;
+            if (resource->dynamic_scope_requirements) {
+                const auto dynamic = resource->dynamic_scope_requirements(request);
+                auth::validate_scope_set(dynamic);
+                scopes.insert(dynamic.begin(), dynamic.end());
+            }
+            return scopes;
+        }
+        if (!resource_template) return {};
+        auto scopes = resource_template->required_scopes;
+        auto view = request;
+        if (view.uri.empty()) view.uri = std::string(uri);
+        if (resource_template->dynamic_scope_requirements) {
+            const auto dynamic = resource_template->dynamic_scope_requirements(view);
+            auth::validate_scope_set(dynamic);
+            scopes.insert(dynamic.begin(), dynamic.end());
+        }
+        return scopes;
+    }
+
+    [[nodiscard]] std::vector<std::pair<std::string, auth::ScopeSet>>
+    prompt_listing_scope_requirements() const {
+        std::vector<PromptDefinition> prompts;
+        {
+            std::lock_guard lock(mutex_);
+            prompts = prompts_;
+        }
+        std::vector<std::pair<std::string, auth::ScopeSet>> result;
+        for (const auto& prompt : prompts) {
+            auto scopes = prompt.required_scopes;
+            if (prompt.dynamic_scope_requirements) {
+                auth::RequestView view;
+                view.method = "prompts/list";
+                view.name = prompt.name;
+                const auto dynamic = prompt.dynamic_scope_requirements(view);
+                auth::validate_scope_set(dynamic);
+                scopes.insert(dynamic.begin(), dynamic.end());
+            }
+            result.emplace_back(prompt.name, std::move(scopes));
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<std::pair<std::string, auth::ScopeSet>>
+    resource_listing_scope_requirements() const {
+        std::vector<ResourceDefinition> resources;
+        {
+            std::lock_guard lock(mutex_);
+            resources = resources_;
+        }
+        std::vector<std::pair<std::string, auth::ScopeSet>> result;
+        for (const auto& resource : resources) {
+            auto scopes = resource.required_scopes;
+            if (resource.dynamic_scope_requirements) {
+                auth::RequestView view{.method = "resources/list", .name = resource.name,
+                                      .uri = resource.uri};
+                const auto dynamic = resource.dynamic_scope_requirements(view);
+                auth::validate_scope_set(dynamic);
+                scopes.insert(dynamic.begin(), dynamic.end());
+            }
+            result.emplace_back(resource.uri, std::move(scopes));
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::vector<std::pair<std::string, auth::ScopeSet>>
+    template_listing_scope_requirements() const {
+        std::vector<ResourceTemplateDefinition> templates;
+        {
+            std::lock_guard lock(mutex_);
+            templates = templates_;
+        }
+        std::vector<std::pair<std::string, auth::ScopeSet>> result;
+        for (const auto& item : templates) {
+            auto scopes = item.required_scopes;
+            if (item.dynamic_scope_requirements) {
+                auth::RequestView view{.method = "resources/templates/list",
+                                      .name = item.name, .uri = item.uri_template};
+                const auto dynamic = item.dynamic_scope_requirements(view);
+                auth::validate_scope_set(dynamic);
+                scopes.insert(dynamic.begin(), dynamic.end());
+            }
+            result.emplace_back(item.uri_template, std::move(scopes));
+        }
+        return result;
+    }
+
     void add_resource_completion(std::string uri_template, std::string variable, CompletionFn fn) {
         std::lock_guard lock(mutex_);
         resource_completions_[{std::move(uri_template), std::move(variable)}] = std::move(fn);
@@ -1391,6 +1530,16 @@ public:
         prompt_.icons = std::move(value);
         return *this;
     }
+    PromptBuilder& requires_scopes(auth::ScopeSet scopes) {
+        auth::validate_scope_set(scopes);
+        prompt_.required_scopes = std::move(scopes);
+        return *this;
+    }
+    PromptBuilder& requires_scopes(auth::DynamicScopeRequirements requirements) {
+        if (!requirements) throw std::invalid_argument("dynamic scope requirements must not be empty");
+        prompt_.dynamic_scope_requirements = std::move(requirements);
+        return *this;
+    }
     PromptBuilder& argument(std::string name, std::string title, std::string description,
                             bool required,
                             std::shared_ptr<const ICompletionProvider> completion = {}) {
@@ -1470,6 +1619,16 @@ public:
     ResourceBuilder& cache_hint(CacheHint value) {
         validate_cache_hint(value);
         resource_.cache_hint = std::move(value);
+        return *this;
+    }
+    ResourceBuilder& requires_scopes(auth::ScopeSet scopes) {
+        auth::validate_scope_set(scopes);
+        resource_.required_scopes = std::move(scopes);
+        return *this;
+    }
+    ResourceBuilder& requires_scopes(auth::DynamicScopeRequirements requirements) {
+        if (!requirements) throw std::invalid_argument("dynamic scope requirements must not be empty");
+        resource_.dynamic_scope_requirements = std::move(requirements);
         return *this;
     }
     ResourceBuilder& handler(
@@ -1568,6 +1727,16 @@ public:
     ResourceTemplateBuilder& cache_hint(CacheHint value) {
         ResourceBuilder::validate_cache_hint(value);
         definition_.cache_hint = std::move(value);
+        return *this;
+    }
+    ResourceTemplateBuilder& requires_scopes(auth::ScopeSet scopes) {
+        auth::validate_scope_set(scopes);
+        definition_.required_scopes = std::move(scopes);
+        return *this;
+    }
+    ResourceTemplateBuilder& requires_scopes(auth::DynamicScopeRequirements requirements) {
+        if (!requirements) throw std::invalid_argument("dynamic scope requirements must not be empty");
+        definition_.dynamic_scope_requirements = std::move(requirements);
         return *this;
     }
     ResourceTemplateBuilder& completion(

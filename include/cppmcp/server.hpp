@@ -14,6 +14,7 @@
 #include <nlohmann/json.hpp>
 
 #include "cppmcp/auth/auth_context.hpp"
+#include "cppmcp/auth/scope_authorization.hpp"
 #include "cppmcp/core/json_rpc.hpp"
 #include "cppmcp/core/json_schema.hpp"
 #include "cppmcp/core/meta.hpp"
@@ -136,10 +137,16 @@ struct ToolDefinition {
     nlohmann::json output_schema = nlohmann::json::object();
     ToolAnnotation annotations;
     nlohmann::json meta = nlohmann::json::object();
+    auth::ScopeSet required_scopes{};
+    auth::DynamicScopeRequirements dynamic_scope_requirements{};
     std::function<ToolHandlerResult(const nlohmann::json&, const nlohmann::json&)> handler;
 
     ToolBuilder header_param(std::string name, bool required = true) &;
     ToolBuilder header_param(std::string name, bool required = true) &&;
+    ToolBuilder requires_scopes(auth::ScopeSet scopes) &;
+    ToolBuilder requires_scopes(auth::ScopeSet scopes) &&;
+    ToolBuilder requires_scopes(auth::DynamicScopeRequirements requirements) &;
+    ToolBuilder requires_scopes(auth::DynamicScopeRequirements requirements) &&;
 };
 
 class ToolBuilder {
@@ -147,6 +154,8 @@ public:
     explicit ToolBuilder(ToolDefinition tool);
 
     ToolBuilder& header_param(std::string name, bool required = true);
+    ToolBuilder& requires_scopes(auth::ScopeSet scopes);
+    ToolBuilder& requires_scopes(auth::DynamicScopeRequirements requirements);
 
 private:
     void validate_and_annotate();
@@ -239,6 +248,10 @@ public:
     bool has_tool(const std::string& name) const;
     std::vector<ToolDefinition> tools() const;
     std::vector<HeaderParamDefinition> tool_header_params(const std::string& name) const;
+    [[nodiscard]] auth::ScopeSet required_tool_scopes(
+        std::string_view name, const auth::RequestView& request) const;
+    [[nodiscard]] std::vector<std::pair<std::string, auth::ScopeSet>>
+    tool_scope_requirements() const;
 
     nlohmann::json discover() const;
     core::Message handle_message(const core::Message& message, ToolContext* context = nullptr);

@@ -262,6 +262,7 @@ inline void add_demo_features(FeatureRegistry& registry) {
                                        {"mimeType", "text/plain"},
                                        {"text", approved ? "secret-value" : "access denied"}}})}};
         },
+        .required_scopes = {"secrets:read"},
     });
     registry.add_resource({
         .uri = "demo://config",

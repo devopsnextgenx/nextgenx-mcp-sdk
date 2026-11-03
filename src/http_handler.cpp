@@ -18,6 +18,7 @@
 #include <string_view>
 
 #include "cppmcp/core/version.hpp"
+#include "cppmcp/server/features.hpp"
 
 namespace cppmcp::transport {
 namespace {
@@ -615,7 +616,9 @@ bool has_client_capabilities(const Request& request) {
 }
 
 bool is_supported_method(std::string_view method) {
-    return method == "server/discover" || method == "tools/list" || method == "tools/call" ||
+    return method == "server/discover" || method == "tools/list" ||
+           method == "prompts/list" || method == "resources/list" ||
+           method == "resources/templates/list" || method == "tools/call" ||
            method == "subscriptions/listen" || method == "prompts/get" ||
            method == "resources/read";
 }
@@ -744,6 +747,12 @@ McpHttpHandler::McpHttpHandler(Server& server, HttpHandlerOptions options,
                        oauth_->scopes_supported.end())) {
         throw std::invalid_argument("OAuth resource metadata is invalid");
     }
+    if (oauth_) {
+        auth::validate_scope_set(oauth_->required_scopes);
+        const auth::ScopeSet supported(oauth_->scopes_supported.begin(),
+                                       oauth_->scopes_supported.end());
+        auth::validate_scope_set(supported);
+    }
 }
 
 void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) const {
@@ -807,7 +816,23 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
     const bool authentication_enabled = oauth_.has_value() ||
                                         static_cast<bool>(options_.authenticator) ||
                                         static_cast<bool>(options_.token_verifier);
-    auto send_auth_challenge = [&](int status, bool invalid_token) {
+    auto scope_parameter = [](const auth::ScopeSet& scopes) {
+        std::string joined;
+        for (const auto& scope : scopes) {
+            if (!joined.empty()) joined.push_back(' ');
+            joined += scope;
+        }
+        std::string escaped;
+        escaped.reserve(joined.size());
+        for (const char ch : joined) {
+            if (ch == '\\' || ch == '"') escaped.push_back('\\');
+            escaped.push_back(ch);
+        }
+        return escaped;
+    };
+    auto required_scopes = oauth_ ? oauth_->required_scopes : auth::ScopeSet{};
+    auto send_auth_challenge = [&](int status, bool invalid_token,
+                                   bool insufficient_scope = false) {
         std::string challenge = "Bearer";
         if (oauth_) {
             const auto metadata_url =
@@ -816,35 +841,60 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                 !oauth_->omit_resource_metadata_parameter) {
                 challenge += " resource_metadata=\"" + metadata_url + "\"";
             }
-            if (std::find(oauth_->scopes_supported.begin(),
-                          oauth_->scopes_supported.end(), "mcp:use") !=
-                oauth_->scopes_supported.end()) {
-                challenge += " scope=\"mcp:use\"";
-            } else if (!oauth_->scopes_supported.empty()) {
-                challenge += " scope=\"" + oauth_->scopes_supported.front() + "\"";
+            if (!required_scopes.empty()) {
+                challenge += " scope=\"" + scope_parameter(required_scopes) + "\"";
             }
         }
-        if (invalid_token) challenge += " error=\"invalid_token\"";
+        if (insufficient_scope) challenge += " error=\"insufficient_scope\"";
+        else if (invalid_token) challenge += " error=\"invalid_token\"";
         exchange->respond(status, {{"WWW-Authenticate", std::move(challenge)}}, "");
     };
     if (authentication_enabled && authorization_values.size() > 1) {
         exchange->respond(400, {}, "");
         return;
     }
-    const auto query_start = request.target.find('?');
-    bool query_token = false;
-    if (query_start != std::string::npos) {
-        auto query = request.target.substr(query_start + 1);
-        std::transform(query.begin(), query.end(), query.begin(), [](unsigned char ch) {
-            return static_cast<char>(std::tolower(ch));
-        });
-        query_token = query.find("access_token=") != std::string::npos;
-    }
-    if (authentication_enabled && query_token) {
-        send_auth_challenge(401, false);
-        return;
-    }
-    if (authentication_enabled) {
+    const auto authenticate = [&]() -> bool {
+        const auto query_start = request.target.find('?');
+        if (authentication_enabled && query_start != std::string::npos) {
+            const auto query_end = request.target.find('#', query_start + 1);
+            auto query = std::string_view(request.target).substr(
+                query_start + 1, query_end == std::string::npos
+                                     ? std::string::npos
+                                     : query_end - query_start - 1);
+            while (!query.empty()) {
+                const auto separator = query.find('&');
+                const auto pair = query.substr(0, separator);
+                const auto equals = pair.find('=');
+                auto key = pair.substr(0, equals);
+                std::string decoded_key;
+                decoded_key.reserve(key.size());
+                for (std::size_t i = 0; i < key.size(); ++i) {
+                    if (key[i] == '%' && i + 2 < key.size()) {
+                        const auto hex_value = [](char ch) -> int {
+                            if (ch >= '0' && ch <= '9') return ch - '0';
+                            if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+                            if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+                            return -1;
+                        };
+                        const auto high = hex_value(key[i + 1]);
+                        const auto low = hex_value(key[i + 2]);
+                        if (high >= 0 && low >= 0) {
+                            decoded_key.push_back(static_cast<char>((high << 4) | low));
+                            i += 2;
+                            continue;
+                        }
+                    }
+                    decoded_key.push_back(key[i] == '+' ? ' ' : key[i]);
+                }
+                if (lower_ascii(decoded_key) == "access_token") {
+                    send_auth_challenge(401, false);
+                    return false;
+                }
+                if (separator == std::string_view::npos) break;
+                query.remove_prefix(separator + 1);
+            }
+        }
+        if (!authentication_enabled) return true;
         std::string_view bearer_token;
         bool bearer_scheme = false;
         if (!authorization_values.empty()) {
@@ -861,34 +911,67 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         }
         if (options_.token_verifier) {
             if (!bearer_scheme || bearer_token.empty()) {
-                send_auth_challenge(401, bearer_scheme && !authorization_values.empty());
-                return;
+                send_auth_challenge(401, false);
+                return false;
             }
             if (!oauth_) {
                 send_auth_challenge(503, false);
-                return;
+                return false;
             }
             try {
                 auth_context = options_.token_verifier->verify(
                     bearer_token, oauth_->resource);
+                try {
+                    auth::validate_scope_set(auth_context->scopes);
+                } catch (const std::invalid_argument&) {
+                    throw auth::TokenVerificationError("invalid scope claim");
+                }
             } catch (const auth::TokenVerificationError&) {
                 send_auth_challenge(401, true);
-                return;
+                return false;
             } catch (const std::exception&) {
                 send_auth_challenge(503, false);
-                return;
+                return false;
             }
         } else if (options_.authenticator) {
             if (!options_.authenticator(request)) {
                 send_auth_challenge(401, bearer_scheme && !bearer_token.empty());
-                return;
+                return false;
             }
         } else {
             send_auth_challenge(authorization_values.empty() ? 401 : 503,
                                 bearer_scheme && !bearer_token.empty());
-            return;
+            return false;
         }
-    }
+        return true;
+    };
+    const auto authorize_scopes = [&]() -> bool {
+        if (!oauth_ || !auth_context) return true;
+        if (!oauth_->scope_hierarchy.missing(auth_context->scopes, required_scopes).empty()) {
+            send_auth_challenge(403, false, true);
+            return false;
+        }
+        return true;
+    };
+    const auto add_operation_scopes = [&](const Request& rpc_request) {
+        auth::RequestView view;
+        view.method = rpc_request.method;
+        view.params = rpc_request.params;
+        if (rpc_request.params.is_object()) {
+            view.name = rpc_request.params.value("name", std::string{});
+            view.uri = rpc_request.params.value("uri", std::string{});
+            view.arguments = rpc_request.params.value("arguments", Json::object());
+        }
+        auth::ScopeSet operation_scopes;
+        if (rpc_request.method == "tools/call") {
+            operation_scopes = server_.required_tool_scopes(view.name, view);
+        } else if (rpc_request.method == "prompts/get") {
+            operation_scopes = server_.feature_registry_->required_prompt_scopes(view.name, view);
+        } else if (rpc_request.method == "resources/read") {
+            operation_scopes = server_.feature_registry_->required_resource_scopes(view.uri, view);
+        }
+        required_scopes.insert(operation_scopes.begin(), operation_scopes.end());
+    };
     if (request.method != "POST" && request.method != "GET" && request.method != "DELETE") {
         exchange->respond(405, {{"Allow", "POST, GET, DELETE"}}, "");
         return;
@@ -933,6 +1016,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                                                "Mcp-Session-Id and legacy MCP-Protocol-Version are required for GET"));
             return;
         }
+        if (!authenticate() || !authorize_scopes()) return;
         {
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
             const auto found = legacy_sessions().find(*session_id);
@@ -964,9 +1048,19 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                                               {"X-Accel-Buffering", "no"}});
         sse.write_event(R"({"jsonrpc":"2.0","method":"ping","params":{}})");
         for (;;) {
+            auto wait = std::chrono::milliseconds(15'000);
+            if (auth_context && auth_context->expires_at !=
+                                    std::chrono::system_clock::time_point{}) {
+                const auto remaining = auth_context->expires_at -
+                                       std::chrono::system_clock::now();
+                if (remaining <= std::chrono::system_clock::duration::zero()) break;
+                wait = std::min(wait, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          remaining));
+                if (wait.count() == 0) break;
+            }
             Json event;
             const auto status = registry->next_legacy_stream(
-                stream_token, event, std::chrono::seconds(15));
+                stream_token, event, wait);
             if (status == SubscriptionReadStatus::event) {
                 sse.write_event(event.dump());
                 continue;
@@ -992,6 +1086,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                           core::protocol_error(ErrorCode::invalid_request, "Mcp-Session-Id is required for DELETE"));
             return;
         }
+        if (!authenticate() || !authorize_scopes()) return;
         {
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
             const auto found = legacy_sessions().find(*session_id);
@@ -1020,6 +1115,18 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         return;
     }
     const auto& message = std::get<Message>(parsed);
+    if (const auto* rpc_request = std::get_if<Request>(&message)) {
+        try {
+            add_operation_scopes(*rpc_request);
+        } catch (const std::exception&) {
+            respond_error(*exchange, 500,
+                          core::protocol_error(ErrorCode::internal_error,
+                                               "Authorization policy evaluation failed"),
+                          rpc_request->id);
+            return;
+        }
+    }
+    if (!authenticate() || !authorize_scopes()) return;
 
     const auto* input_result = std::get_if<core::ResultResponse>(&message);
     const auto* input_error = std::get_if<core::ErrorResponse>(&message);
@@ -1414,9 +1521,18 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         stream.write_event(acknowledgement.dump());
 
         for (;;) {
+            auto wait = std::chrono::milliseconds(15'000);
+            if (auth_context && auth_context->expires_at !=
+                                    std::chrono::system_clock::time_point{}) {
+                const auto remaining = auth_context->expires_at -
+                                       std::chrono::system_clock::now();
+                if (remaining <= std::chrono::system_clock::duration::zero()) break;
+                wait = std::min(wait, std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          remaining));
+                if (wait.count() == 0) break;
+            }
             core::Json event;
-            const auto status = registry->next(subscriber_id, event,
-                                               std::chrono::seconds(15));
+            const auto status = registry->next(subscriber_id, event, wait);
             if (status == SubscriptionReadStatus::event) {
                 stream.write_event(event.dump());
                 continue;
@@ -1469,6 +1585,63 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
     else if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
     auto response = server_.handle_message(message, &context);
     context.finish();
+    if (oauth_ && oauth_->filter_listings && auth_context) {
+        try {
+            std::vector<std::pair<std::string, auth::ScopeSet>> requirements;
+            const char* collection = nullptr;
+            const char* key = nullptr;
+            if (rpc_request.method == "tools/list") {
+                requirements = server_.tool_scope_requirements();
+                collection = "tools";
+                key = "name";
+            } else if (rpc_request.method == "prompts/list") {
+                requirements = server_.feature_registry_->prompt_listing_scope_requirements();
+                collection = "prompts";
+                key = "name";
+            } else if (rpc_request.method == "resources/list") {
+                requirements = server_.feature_registry_->resource_listing_scope_requirements();
+                collection = "resources";
+                key = "uri";
+            } else if (rpc_request.method == "resources/templates/list") {
+                requirements = server_.feature_registry_->template_listing_scope_requirements();
+                collection = "resourceTemplates";
+                key = "uriTemplate";
+            }
+            if (collection != nullptr) {
+                std::map<std::string, auth::ScopeSet> by_name;
+                for (auto& [name, scopes] : requirements) {
+                    by_name.emplace(std::move(name), std::move(scopes));
+                }
+                if (auto* result = std::get_if<core::ResultResponse>(&response);
+                    result && result->result.is_object() &&
+                    result->result.contains(collection) &&
+                    result->result[collection].is_array()) {
+                    auto& entries = result->result[collection];
+                    for (auto item = entries.begin(); item != entries.end();) {
+                        const bool invalid_item = !item->is_object() || !item->contains(key) ||
+                                                  !(*item)[key].is_string();
+                        const auto found = invalid_item
+                            ? by_name.end()
+                            : by_name.find((*item)[key].get<std::string>());
+                        if (invalid_item ||
+                            (found != by_name.end() &&
+                             !oauth_->scope_hierarchy.missing(
+                                 auth_context->scopes, found->second).empty())) {
+                            item = entries.erase(item);
+                        } else {
+                            ++item;
+                        }
+                    }
+                }
+            }
+        } catch (const std::exception&) {
+            respond_error(*exchange, 500,
+                          core::protocol_error(ErrorCode::internal_error,
+                                               "Authorization policy evaluation failed"),
+                          rpc_request.id);
+            return;
+        }
+    }
     if (rpc_request.method == "server/discover") {
         if (auto* result = std::get_if<core::ResultResponse>(&response)) {
             result->result["protocolVersions"] = Json::array({"2026-07-28"});

@@ -213,12 +213,42 @@ ToolBuilder& ToolBuilder::header_param(std::string name, bool required) {
     return *this;
 }
 
+ToolBuilder& ToolBuilder::requires_scopes(auth::ScopeSet scopes) {
+    auth::validate_scope_set(scopes);
+    tool_.required_scopes = std::move(scopes);
+    return *this;
+}
+
+ToolBuilder& ToolBuilder::requires_scopes(auth::DynamicScopeRequirements requirements) {
+    if (!requirements) {
+        throw std::invalid_argument("dynamic scope requirements must not be empty");
+    }
+    tool_.dynamic_scope_requirements = std::move(requirements);
+    return *this;
+}
+
 ToolBuilder ToolDefinition::header_param(std::string name, bool required) & {
     return ToolBuilder(*this).header_param(std::move(name), required);
 }
 
 ToolBuilder ToolDefinition::header_param(std::string name, bool required) && {
     return ToolBuilder(std::move(*this)).header_param(std::move(name), required);
+}
+
+ToolBuilder ToolDefinition::requires_scopes(auth::ScopeSet scopes) & {
+    return ToolBuilder(*this).requires_scopes(std::move(scopes));
+}
+
+ToolBuilder ToolDefinition::requires_scopes(auth::ScopeSet scopes) && {
+    return ToolBuilder(std::move(*this)).requires_scopes(std::move(scopes));
+}
+
+ToolBuilder ToolDefinition::requires_scopes(auth::DynamicScopeRequirements requirements) & {
+    return ToolBuilder(*this).requires_scopes(std::move(requirements));
+}
+
+ToolBuilder ToolDefinition::requires_scopes(auth::DynamicScopeRequirements requirements) && {
+    return ToolBuilder(std::move(*this)).requires_scopes(std::move(requirements));
 }
 
 void ToolBuilder::validate_and_annotate() {
@@ -475,6 +505,7 @@ std::stop_token ToolContext::cancellation_token() const noexcept {
 }
 
 void Server::add_tool(ToolDefinition tool) {
+    auth::validate_scope_set(tool.required_scopes);
     const auto schemas = compile_tool_schemas(tool);
     std::lock_guard<std::mutex> lock(mutex_);
     CPPMCP_LOG_DEBUG("registering tool '" << tool.name << "'");
@@ -559,6 +590,48 @@ std::vector<HeaderParamDefinition> Server::tool_header_params(const std::string&
     std::lock_guard<std::mutex> lock(mutex_);
     const auto it = header_params_.find(name);
     return it == header_params_.end() ? std::vector<HeaderParamDefinition>{} : it->second;
+}
+
+auth::ScopeSet Server::required_tool_scopes(
+    std::string_view name, const auth::RequestView& request) const {
+    std::optional<ToolDefinition> tool;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = tools_.find(std::string(name));
+        if (found != tools_.end()) tool = found->second;
+    }
+    if (!tool) return {};
+    auto scopes = tool->required_scopes;
+    if (tool->dynamic_scope_requirements) {
+        const auto dynamic = tool->dynamic_scope_requirements(request);
+        auth::validate_scope_set(dynamic);
+        scopes.insert(dynamic.begin(), dynamic.end());
+    }
+    return scopes;
+}
+
+std::vector<std::pair<std::string, auth::ScopeSet>> Server::tool_scope_requirements() const {
+    std::vector<ToolDefinition> tools;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        tools.reserve(tools_.size());
+        for (const auto& [_, tool] : tools_) tools.push_back(tool);
+    }
+    std::vector<std::pair<std::string, auth::ScopeSet>> result;
+    result.reserve(tools.size());
+    for (const auto& tool : tools) {
+        auto scopes = tool.required_scopes;
+        if (tool.dynamic_scope_requirements) {
+            auth::RequestView view;
+            view.method = "tools/list";
+            view.name = tool.name;
+            const auto dynamic = tool.dynamic_scope_requirements(view);
+            auth::validate_scope_set(dynamic);
+            scopes.insert(dynamic.begin(), dynamic.end());
+        }
+        result.emplace_back(tool.name, std::move(scopes));
+    }
+    return result;
 }
 
 nlohmann::json Server::discover() const {
