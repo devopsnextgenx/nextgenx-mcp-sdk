@@ -24,6 +24,8 @@ void test_elicit();
 void test_request_state();
 void test_two_instance();
 void test_mrtr_client();
+void test_client_mrtr_prompt();
+void test_client_mrtr_resource();
 void test_elicit_url();
 void test_mrtr_generic();
 void test_legacy_adapter();
@@ -170,6 +172,8 @@ int main(int argc, char** argv) {
     run_selected("request_state", test_request_state);
     run_selected("two_instance", test_two_instance);
     run_selected("mrtr_client", test_mrtr_client);
+    run_selected("client_mrtr_prompt", test_client_mrtr_prompt);
+    run_selected("client_mrtr_resource", test_client_mrtr_resource);
     run_selected("elicit_url", test_elicit_url);
     run_selected("mrtr_generic", test_mrtr_generic);
     run_selected("legacy_adapter", test_legacy_adapter);

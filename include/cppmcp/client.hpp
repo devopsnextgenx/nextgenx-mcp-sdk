@@ -51,6 +51,9 @@ private:
 
 class Client {
 public:
+    using ElicitationHandler =
+        std::function<nlohmann::json(const std::string&, const nlohmann::json&)>;
+
     struct CallToolOptions {
         std::string log_level;
         std::function<void(double, std::optional<double>, std::optional<std::string>)>
@@ -74,6 +77,8 @@ public:
     void connect(std::shared_ptr<cppmcp::core::ITransport> transport);
     void connect_http(HttpClientOptions options);
     void close();
+    void set_elicitation_handler(ElicitationHandler handler,
+                                 std::size_t max_rounds = 10);
     void cancel(const cppmcp::core::RequestId& request_id);
     [[nodiscard]] std::string http_mode() const;
     [[nodiscard]] std::shared_ptr<transport::ListenHandle> listen(
@@ -107,6 +112,8 @@ public:
 private:
     nlohmann::json feature_request(const std::string& method,
                                   nlohmann::json params = nlohmann::json::object());
+    nlohmann::json feature_request_with_elicitation(
+        const std::string& method, nlohmann::json params);
     std::vector<nlohmann::json> list_all(const std::string& method,
                                          std::string_view collection);
     void handle_server_notification(const core::Notification& notification);
@@ -132,6 +139,9 @@ private:
     std::atomic<std::uint64_t> next_progress_token_{1};
     std::mutex tool_callbacks_mutex_;
     std::map<std::string, ActiveToolCall> active_tool_calls_;
+    mutable std::mutex elicitation_handler_mutex_;
+    ElicitationHandler elicitation_handler_;
+    std::size_t elicitation_max_rounds_ = 10;
     std::mutex legacy_tool_call_mutex_;
     std::mutex logging_tool_call_mutex_;
     ClientCache cache_;

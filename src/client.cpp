@@ -97,6 +97,13 @@ void Client::close() {
     }
 }
 
+void Client::set_elicitation_handler(ElicitationHandler handler,
+                                    std::size_t max_rounds) {
+    std::lock_guard<std::mutex> lock(elicitation_handler_mutex_);
+    elicitation_handler_ = std::move(handler);
+    elicitation_max_rounds_ = max_rounds;
+}
+
 void Client::cancel(const cppmcp::core::RequestId& request_id) {
     if (!connection_) {
         throw std::runtime_error("client is not connected");
@@ -254,7 +261,8 @@ nlohmann::json Client::get_prompt(const std::string& name,
     if (name.empty() || !arguments.is_object()) {
         throw std::invalid_argument("prompt request requires a name and object arguments");
     }
-    return feature_request("prompts/get", {{"name", name}, {"arguments", arguments}});
+    return feature_request_with_elicitation(
+        "prompts/get", {{"name", name}, {"arguments", arguments}});
 }
 
 nlohmann::json Client::list_resources(std::optional<std::string> cursor) {
@@ -276,7 +284,78 @@ nlohmann::json Client::list_resource_templates(
 
 nlohmann::json Client::read_resource(const std::string& uri) {
     if (uri.empty()) throw std::invalid_argument("resource URI must not be empty");
-    return feature_request("resources/read", {{"uri", uri}});
+    return feature_request_with_elicitation("resources/read", {{"uri", uri}});
+}
+
+nlohmann::json Client::feature_request_with_elicitation(
+    const std::string& method, nlohmann::json params) {
+    if (!connection_) {
+        throw std::runtime_error("client is not connected");
+    }
+
+    ElicitationHandler handler;
+    std::size_t max_rounds = 0;
+    {
+        std::lock_guard<std::mutex> lock(elicitation_handler_mutex_);
+        handler = elicitation_handler_;
+        max_rounds = elicitation_max_rounds_;
+    }
+    if (!params.is_object()) {
+        throw std::invalid_argument("feature request parameters must be an object");
+    }
+    auto& meta = params["_meta"];
+    if (!meta.is_object()) meta = nlohmann::json::object();
+    meta["io.modelcontextprotocol/protocolVersion"] = "2026-07-28";
+    meta["io.modelcontextprotocol/clientInfo"] = {
+        {"name", info_.name}, {"title", info_.title}, {"version", info_.version}};
+    if (handler) {
+        meta["io.modelcontextprotocol/clientCapabilities"] = {
+            {"elicitation", {{"form", nlohmann::json::object()}}}};
+    }
+
+    const auto original_params = params;
+    for (std::size_t round = 0;; ++round) {
+        auto result = connection_->send_request(method, params).get();
+        if (result.value("resultType", std::string("complete")) != "input_required") {
+            return result;
+        }
+
+        const auto requests = result.value("inputRequests", nlohmann::json::object());
+        if (!requests.is_object() ||
+            (!result.contains("inputRequests") && !result.contains("requestState")) ||
+            (result.contains("requestState") && !result["requestState"].is_string())) {
+            throw std::runtime_error("Invalid input-required result");
+        }
+        if (!requests.empty() && !handler) {
+            return result;
+        }
+        if (round >= max_rounds) {
+            throw std::runtime_error(
+                "TooManyRounds: feature request exceeded its elicitation round limit");
+        }
+
+        nlohmann::json responses = nlohmann::json::object();
+        for (auto item = requests.begin(); item != requests.end(); ++item) {
+            if (item.value().value("method", std::string{}) != "elicitation/create") {
+                throw std::runtime_error("No handler for input request method");
+            }
+            const auto& input_params = item.value().at("params");
+            if (input_params.value("mode", std::string("form")) != "form") {
+                throw std::runtime_error("Unsupported elicitation mode");
+            }
+            core::validate_elicitation_form_schema(
+                input_params.at("requestedSchema"));
+            responses[item.key()] = handler(item.key(), item.value());
+        }
+
+        params = original_params;
+        if (!responses.empty()) {
+            params["inputResponses"] = std::move(responses);
+        }
+        if (result.contains("requestState")) {
+            params["requestState"] = result["requestState"];
+        }
+    }
 }
 
 nlohmann::json Client::complete(const nlohmann::json& params) {

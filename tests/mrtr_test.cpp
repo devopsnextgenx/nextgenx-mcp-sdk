@@ -2,6 +2,7 @@
 #include "cppmcp/client.hpp"
 #include "cppmcp/transport/stdio.hpp"
 #include "cppmcp/server.hpp"
+#include "cppmcp/server/features.hpp"
 #include "test.hpp"
 
 #include <chrono>
@@ -242,6 +243,67 @@ void test_mrtr_client() {
         limited = std::string(error.what()).find("TooManyRounds") != std::string::npos;
     }
     CPPMCP_CHECK(limited);
+}
+
+void test_client_mrtr_prompt() {
+    cppmcp::Server server;
+    server.prompt("confirm").handler(
+        [](const cppmcp::examples::CallContext& context, const Json&) {
+            if (context.input_responses().empty()) {
+                return std::variant<cppmcp::PromptResult, cppmcp::InputRequired>(
+                    cppmcp::InputRequired{input_requests()});
+            }
+            return std::variant<cppmcp::PromptResult, cppmcp::InputRequired>(
+                cppmcp::PromptResult{{{"messages", Json::array()}}});
+        });
+    auto [client_transport, server_transport] = cppmcp::core::make_memory_transport_pair();
+    server_transport->on_message([&](const cppmcp::core::Message& message) {
+        server_transport->send(server.handle_message(message));
+    });
+    cppmcp::Client client;
+    client.connect(client_transport);
+    int invocations = 0;
+    client.set_elicitation_handler([&](const std::string& id, const Json& request) {
+        ++invocations;
+        CPPMCP_CHECK(id == "confirm");
+        CPPMCP_CHECK(request["method"] == "elicitation/create");
+        return Json{{"action", "accept"}, {"content", {{"confirm", true}}}};
+    });
+    const auto result = client.get_prompt("confirm");
+    CPPMCP_CHECK(invocations == 1);
+    CPPMCP_CHECK(result["messages"].is_array());
+    client.close();
+}
+
+void test_client_mrtr_resource() {
+    cppmcp::Server server;
+    server.resource("demo://confirm").handler(
+        [](const cppmcp::examples::CallContext& context) {
+            if (context.input_responses().empty()) {
+                return std::variant<cppmcp::ReadResult, cppmcp::InputRequired>(
+                    cppmcp::InputRequired{input_requests()});
+            }
+            return std::variant<cppmcp::ReadResult, cppmcp::InputRequired>(
+                cppmcp::ReadResult{{{"contents", Json::array(
+                    {{{"uri", "demo://confirm"}, {"text", "confirmed"}}})}}});
+        });
+    auto [client_transport, server_transport] = cppmcp::core::make_memory_transport_pair();
+    server_transport->on_message([&](const cppmcp::core::Message& message) {
+        server_transport->send(server.handle_message(message));
+    });
+    cppmcp::Client client;
+    client.connect(client_transport);
+    int invocations = 0;
+    client.set_elicitation_handler([&](const std::string& id, const Json& request) {
+        ++invocations;
+        CPPMCP_CHECK(id == "confirm");
+        CPPMCP_CHECK(request["method"] == "elicitation/create");
+        return Json{{"action", "accept"}, {"content", {{"confirm", true}}}};
+    });
+    const auto result = client.read_resource("demo://confirm");
+    CPPMCP_CHECK(invocations == 1);
+    CPPMCP_CHECK(result["contents"][0]["text"] == "confirmed");
+    client.close();
 }
 
 void test_elicit_url() {
