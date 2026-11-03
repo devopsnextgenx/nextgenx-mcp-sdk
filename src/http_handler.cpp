@@ -35,9 +35,21 @@ struct LegacySession {
     std::chrono::steady_clock::time_point created = std::chrono::steady_clock::now();
     std::chrono::steady_clock::time_point last_seen = std::chrono::steady_clock::now();
     bool active = true;
+    bool principal_bound = false;
+    std::string issuer;
+    std::string subject;
+    std::string client_id;
     Json capabilities = Json::object();
     std::map<core::RequestId, std::shared_ptr<std::promise<Json>>> pending_inputs{};
 };
+
+bool session_principal_matches(const LegacySession& session,
+                               const std::optional<auth::AuthContext>& context) {
+    if (!session.principal_bound) return true;
+    return context && context->issuer == session.issuer &&
+           context->subject == session.subject &&
+           context->client_id == session.client_id;
+}
 
 std::mutex& legacy_session_mutex() {
     static std::mutex mutex;
@@ -152,6 +164,21 @@ std::string_view trim(std::string_view value) {
 std::string path_from_target(std::string_view target) {
     const auto query = target.find_first_of("?#");
     return std::string(target.substr(0, query));
+}
+
+std::string oauth_prm_path(std::string_view endpoint_path) {
+    while (!endpoint_path.empty() && endpoint_path.front() == '/') {
+        endpoint_path.remove_prefix(1);
+    }
+    return "/.well-known/oauth-protected-resource/" + std::string(endpoint_path);
+}
+
+std::string oauth_prm_url(std::string_view resource, std::string_view prm_path) {
+    const auto scheme = resource.find("://");
+    if (scheme == std::string_view::npos) return {};
+    const auto authority_start = scheme + 3;
+    const auto authority_end = resource.find_first_of("/?#", authority_start);
+    return std::string(resource.substr(0, authority_end)) + std::string(prm_path);
 }
 
 std::vector<std::string_view> header_values(const Headers& headers, std::string_view name) {
@@ -703,10 +730,19 @@ bool header_value_is_plain_safe(std::string_view value) {
 
 }  // namespace
 
-McpHttpHandler::McpHttpHandler(Server& server, HttpHandlerOptions options)
-    : server_(server), options_(std::move(options)) {
+McpHttpHandler::McpHttpHandler(Server& server, HttpHandlerOptions options,
+                               std::optional<OAuthResourceOptions> oauth)
+    : server_(server), options_(std::move(options)),
+      oauth_(oauth ? std::move(oauth) : options_.oauth) {
     if (options_.path.empty() || options_.path.front() != '/') {
         throw std::invalid_argument("HTTP MCP endpoint path must begin with '/'");
+    }
+    if (oauth_ && (oauth_->resource.empty() || oauth_->authorization_servers.empty() ||
+                   oauth_->resource.find('#') != std::string::npos ||
+                   std::find(oauth_->scopes_supported.begin(),
+                             oauth_->scopes_supported.end(), "offline_access") !=
+                       oauth_->scopes_supported.end())) {
+        throw std::invalid_argument("OAuth resource metadata is invalid");
     }
 }
 
@@ -715,6 +751,43 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         throw std::invalid_argument("HTTP exchange must not be null");
     }
     const auto& request = exchange->request();
+    std::optional<auth::AuthContext> auth_context;
+    if (oauth_) {
+        const auto target_path = path_from_target(request.target);
+        const auto inserted_path = oauth_prm_path(options_.path);
+        if (target_path == inserted_path ||
+            target_path == "/.well-known/oauth-protected-resource") {
+            const Headers cors{{"Access-Control-Allow-Origin", "*"},
+                               {"Access-Control-Allow-Methods", "GET, OPTIONS"},
+                               {"Access-Control-Allow-Headers", "Content-Type"},
+                               {"Cache-Control", "public, max-age=3600"}};
+            if (request.method == "OPTIONS") {
+                exchange->respond(204, cors, "");
+                return;
+            }
+            if (request.method != "GET") {
+                exchange->respond(405, {{"Allow", "GET, OPTIONS"}}, "");
+                return;
+            }
+            Json metadata = {
+                {"resource", oauth_->resource},
+                {"authorization_servers", oauth_->authorization_servers},
+                {"bearer_methods_supported", oauth_->bearer_methods_supported}};
+            if (!oauth_->scopes_supported.empty()) {
+                metadata["scopes_supported"] = oauth_->scopes_supported;
+            }
+            if (!oauth_->resource_name.empty()) {
+                metadata["resource_name"] = oauth_->resource_name;
+            }
+            if (!oauth_->resource_documentation.empty()) {
+                metadata["resource_documentation"] = oauth_->resource_documentation;
+            }
+            auto headers = cors;
+            headers.emplace_back("Content-Type", "application/json");
+            exchange->respond(200, std::move(headers), metadata.dump());
+            return;
+        }
+    }
     if (path_from_target(request.target) != options_.path) {
         respond_error(*exchange, 404,
                       core::protocol_error(ErrorCode::method_not_found, "MCP endpoint not found"));
@@ -730,9 +803,91 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                       core::protocol_error(ErrorCode::invalid_request, "Host is not allowed"));
         return;
     }
-    if (options_.authenticator && !options_.authenticator(request)) {
-        exchange->respond(401, {{"WWW-Authenticate", "Bearer"}}, "");
+    const auto authorization_values = header_values(request.headers, "Authorization");
+    const bool authentication_enabled = oauth_.has_value() ||
+                                        static_cast<bool>(options_.authenticator) ||
+                                        static_cast<bool>(options_.token_verifier);
+    auto send_auth_challenge = [&](int status, bool invalid_token) {
+        std::string challenge = "Bearer";
+        if (oauth_) {
+            const auto metadata_url =
+                oauth_prm_url(oauth_->resource, oauth_prm_path(options_.path));
+            if (!metadata_url.empty() &&
+                !oauth_->omit_resource_metadata_parameter) {
+                challenge += " resource_metadata=\"" + metadata_url + "\"";
+            }
+            if (std::find(oauth_->scopes_supported.begin(),
+                          oauth_->scopes_supported.end(), "mcp:use") !=
+                oauth_->scopes_supported.end()) {
+                challenge += " scope=\"mcp:use\"";
+            } else if (!oauth_->scopes_supported.empty()) {
+                challenge += " scope=\"" + oauth_->scopes_supported.front() + "\"";
+            }
+        }
+        if (invalid_token) challenge += " error=\"invalid_token\"";
+        exchange->respond(status, {{"WWW-Authenticate", std::move(challenge)}}, "");
+    };
+    if (authentication_enabled && authorization_values.size() > 1) {
+        exchange->respond(400, {}, "");
         return;
+    }
+    const auto query_start = request.target.find('?');
+    bool query_token = false;
+    if (query_start != std::string::npos) {
+        auto query = request.target.substr(query_start + 1);
+        std::transform(query.begin(), query.end(), query.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        query_token = query.find("access_token=") != std::string::npos;
+    }
+    if (authentication_enabled && query_token) {
+        send_auth_challenge(401, false);
+        return;
+    }
+    if (authentication_enabled) {
+        std::string_view bearer_token;
+        bool bearer_scheme = false;
+        if (!authorization_values.empty()) {
+            const auto authorization = trim(authorization_values.front());
+            const auto separator = authorization.find_first_of(" \t");
+            const auto scheme = authorization.substr(0, separator);
+            bearer_scheme = lower_ascii(scheme) == "bearer";
+            if (bearer_scheme && separator != std::string_view::npos) {
+                bearer_token = trim(authorization.substr(separator + 1));
+                if (bearer_token.find_first_of(" \t") != std::string_view::npos) {
+                    bearer_token = {};
+                }
+            }
+        }
+        if (options_.token_verifier) {
+            if (!bearer_scheme || bearer_token.empty()) {
+                send_auth_challenge(401, bearer_scheme && !authorization_values.empty());
+                return;
+            }
+            if (!oauth_) {
+                send_auth_challenge(503, false);
+                return;
+            }
+            try {
+                auth_context = options_.token_verifier->verify(
+                    bearer_token, oauth_->resource);
+            } catch (const auth::TokenVerificationError&) {
+                send_auth_challenge(401, true);
+                return;
+            } catch (const std::exception&) {
+                send_auth_challenge(503, false);
+                return;
+            }
+        } else if (options_.authenticator) {
+            if (!options_.authenticator(request)) {
+                send_auth_challenge(401, bearer_scheme && !bearer_token.empty());
+                return;
+            }
+        } else {
+            send_auth_challenge(authorization_values.empty() ? 401 : 503,
+                                bearer_scheme && !bearer_token.empty());
+            return;
+        }
     }
     if (request.method != "POST" && request.method != "GET" && request.method != "DELETE") {
         exchange->respond(405, {{"Allow", "POST, GET, DELETE"}}, "");
@@ -781,7 +936,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         {
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
             const auto found = legacy_sessions().find(*session_id);
-            if (found == legacy_sessions().end() || !found->second.active) {
+            if (found == legacy_sessions().end() || !found->second.active ||
+                !session_principal_matches(found->second, auth_context)) {
                 respond_error(*exchange, 404,
                               core::protocol_error(ErrorCode::invalid_request,
                                                    "Legacy session not found"));
@@ -838,7 +994,15 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         }
         {
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
-            legacy_sessions().erase(*session_id);
+            const auto found = legacy_sessions().find(*session_id);
+            if (found == legacy_sessions().end() ||
+                !session_principal_matches(found->second, auth_context)) {
+                respond_error(*exchange, 404,
+                              core::protocol_error(ErrorCode::invalid_request,
+                                                   "Legacy session not found"));
+                return;
+            }
+            legacy_sessions().erase(found);
         }
         server_.subscriptions_->remove_legacy_session(*session_id);
         exchange->respond(200, {{"Content-Type", "application/json"}}, "{}\n");
@@ -940,9 +1104,18 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                             {"serverInfo", {{"name", "cppmcp"}, {"title", "cppmcp"}, {"version", "0.1.0"}}} };
             {
                 std::lock_guard<std::mutex> lock(legacy_session_mutex());
-                legacy_sessions()[sid] = LegacySession{sid, "2025-11-25"};
-                legacy_sessions()[sid].capabilities = rpc_request.params.value(
+                LegacySession created_session;
+                created_session.id = sid;
+                created_session.protocol_version = "2025-11-25";
+                created_session.capabilities = rpc_request.params.value(
                     "capabilities", Json::object());
+                if (auth_context) {
+                    created_session.principal_bound = true;
+                    created_session.issuer = auth_context->issuer;
+                    created_session.subject = auth_context->subject;
+                    created_session.client_id = auth_context->client_id;
+                }
+                legacy_sessions().insert_or_assign(sid, std::move(created_session));
             }
             bool prompts_list_changed = false;
             bool resources_list_changed = false;
@@ -967,7 +1140,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         {
             std::lock_guard<std::mutex> lock(legacy_session_mutex());
             const auto it = legacy_sessions().find(*session_id);
-            if (it == legacy_sessions().end()) {
+            if (it == legacy_sessions().end() ||
+                !session_principal_matches(it->second, auth_context)) {
                 respond_error(*exchange, 404,
                               core::protocol_error(ErrorCode::invalid_request,
                                                    "Unknown session"), rpc_request.id);
@@ -1035,7 +1209,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             start_sse().write_event(event.dump());
         }, rpc_request.params, options_.notification_min_interval,
               options_.max_notifications_per_request, std::move(legacy_capabilities));
-        if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
+        if (auth_context) context.set_auth_context(*auth_context);
+        else if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
         if (can_emit_sse) {
             context.set_input_request_handler([&, sid = *session_id](const Json& input) {
                 const core::RequestId id = "server-" + generate_session_id();
@@ -1290,7 +1465,8 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         start_sse().write_event(event.dump());
     }, rpc_request.params, options_.notification_min_interval,
        options_.max_notifications_per_request);
-    if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
+    if (auth_context) context.set_auth_context(*auth_context);
+    else if (options_.request_state_subject) context.set_request_subject(options_.request_state_subject(request));
     auto response = server_.handle_message(message, &context);
     context.finish();
     if (rpc_request.method == "server/discover") {

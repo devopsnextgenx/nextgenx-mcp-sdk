@@ -68,6 +68,46 @@ one-time execution is required. Recheck authorization on every retry.
 Applications may inject their own `IRequestStateCodec`; they must preserve
 authentication, expiry, binding and resource limits themselves.
 
+## HTTP OAuth resource-server boundary
+
+The HTTP OAuth boundary is opt-in. When enabled, require Bearer credentials on
+every MCP endpoint request; never place an access token in a URL. `AuthContext`
+contains verified identity, audience, scopes and claims, but deliberately has
+no raw-token accessor. `ITokenExchanger` is the appropriate application-level
+boundary for obtaining a separate upstream token; do not forward the inbound
+MCP access token to another service.
+
+`JwtVerifier` uses an explicit algorithm allow-list (RS256, PS256, ES256 and
+EdDSA by default), requires key/algorithm type agreement and rejects `none`,
+HMAC algorithms and token-supplied key locations/material (`crit`, `jku`,
+`x5u`, `jwk`). It checks exact configured issuer strings, resource audience,
+expiration and optional time claims before returning an `AuthContext`. Keep the
+allow-list narrow and never add HMAC for a verifier that accepts RSA public
+keys.
+
+JWKS, metadata and introspection fetches use `cppmcp::net::NetworkPolicy`.
+The policy resolves once, validates every returned address, and connects to the
+resolved endpoint rather than resolving again at connect time. It blocks
+loopback/private/link-local/CGNAT and metadata ranges by default, disallows
+redirects, bounds response sizes and applies connect/read timeouts. TLS
+certificate and hostname verification remain enabled. The
+`--auth-insecure-http-for-testing` option permits HTTP only when all resolved
+destinations are loopback; it is for local fixtures, never deployment.
+
+JWKS refreshes are rate-limited for unknown key IDs. Cache behavior and the
+configured stale-key grace period matter in multi-instance deployments: each
+process has its own cache and rotation visibility. Introspection cache state
+is also process-local. Configure issuers and the resource audience identically
+across instances, monitor verifier failures without recording tokens, and allow
+the authorization server to recover before stale-key grace expires.
+
+Legacy HTTP sessions are bound to issuer, subject and client ID at initialize.
+Presenting a different principal does not reveal the session and is treated as
+not found. Sessions are not authentication credentials; every request still
+needs a valid bearer token. Current stream-expiry enforcement, scope-based
+authorization and OAuth client storage are tracked in [6_PROGRESS.md](6_PROGRESS.md)
+and must be completed before claiming full Phase 6 coverage.
+
 ## File resources
 
 The public file-resource provider opens paths relative to a pinned root

@@ -37,6 +37,7 @@ void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
 void test_client_api(std::string_view selected);
 void test_http_handler();
+void test_prm_metadata_and_token_verifier();
 void test_cancellation_strategy();
 void test_http_server_methods();
 void test_http_server_host_origin();
@@ -189,6 +190,7 @@ int main(int argc, char** argv) {
     run_selected("client_cache", [&] { test_client_api("client_cache"); });
     run_selected("client_resubscribe", [&] { test_client_api("client_resubscribe"); });
     run_selected("http_handler", test_http_handler);
+    run_selected("prm_handler_auth", test_prm_metadata_and_token_verifier);
     run_selected("http_handler_mcp_param_stateless", test_http_handler_header_params_stateless);
     run_selected("http_handler_mcp_param_types",
                  test_http_handler_header_params_primitive_types);

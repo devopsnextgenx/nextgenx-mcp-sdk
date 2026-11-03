@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "cppmcp/auth/auth_context.hpp"
 #include "cppmcp/server.hpp"
 
 namespace cppmcp::transport {
@@ -92,6 +93,18 @@ enum class HttpMode {
     dual,
 };
 
+struct OAuthResourceOptions {
+    std::string resource;
+    std::vector<std::string> authorization_servers;
+    std::vector<std::string> scopes_supported;
+    std::string resource_name;
+    std::string resource_documentation;
+    std::vector<std::string> bearer_methods_supported{"header"};
+    bool omit_resource_metadata_parameter = false;
+    std::chrono::seconds jwks_min_refresh{10};
+    bool filter_listings = false;
+};
+
 struct HttpHandlerOptions {
     std::string path = "/mcp";
     HttpMode mode = HttpMode::dual;
@@ -104,6 +117,8 @@ struct HttpHandlerOptions {
     std::vector<std::string> allowed_hosts;
     std::function<bool(const HttpRequest&)> authenticator;
     std::function<std::string(const HttpRequest&)> request_state_subject;
+    std::shared_ptr<const auth::ITokenVerifier> token_verifier;
+    std::optional<OAuthResourceOptions> oauth;
 };
 
 enum class TlsVersion {
@@ -126,6 +141,7 @@ struct HttpOptions {
     bool allow_non_loopback = false;
     bool allow_insecure_remote = false;
     std::optional<HttpTlsOptions> tls;
+    std::optional<OAuthResourceOptions> oauth;
     HttpMode mode = HttpMode::dual;
     HttpHandlerOptions handler;
     std::function<std::optional<std::string>(const HttpRequest&)> route;
@@ -202,13 +218,15 @@ private:
 
 class McpHttpHandler {
 public:
-    explicit McpHttpHandler(Server& server, HttpHandlerOptions options = {});
+    explicit McpHttpHandler(Server& server, HttpHandlerOptions options = {},
+                            std::optional<OAuthResourceOptions> oauth = std::nullopt);
 
     void handle(const std::shared_ptr<IHttpExchange>& exchange) const;
 
 private:
     Server& server_;
     HttpHandlerOptions options_;
+    std::optional<OAuthResourceOptions> oauth_;
 };
 
 [[nodiscard]] std::string encode_mirrored_header_value(std::string_view value);

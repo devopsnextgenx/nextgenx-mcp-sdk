@@ -12,6 +12,7 @@
 #include <iostream>
 #include <iterator>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <stop_token>
 #include <string>
@@ -19,6 +20,8 @@
 #include <utility>
 
 #include "cppmcp/server.hpp"
+#include "cppmcp/auth/jwt_verifier.hpp"
+#include "cppmcp/auth/introspection_verifier.hpp"
 #include "cppmcp/transport/http.hpp"
 #include "cppmcp/transport/http_server.hpp"
 
@@ -170,6 +173,45 @@ std::string parse_request_state_key(const std::string& value) {
     return value;
 }
 
+bool loopback_url(const std::string& value) {
+    const auto scheme = value.find("://");
+    if (scheme == std::string::npos) return false;
+    const auto authority_start = scheme + 3;
+    const auto authority_end = value.find_first_of("/?#", authority_start);
+    auto authority = value.substr(authority_start, authority_end - authority_start);
+    if (!authority.empty() && authority.front() == '[') {
+        const auto close = authority.find(']');
+        if (close == std::string::npos) return false;
+        authority.resize(close + 1);
+        return authority == "[::1]";
+    }
+    const auto colon = authority.find(':');
+    if (colon != std::string::npos) authority.resize(colon);
+    return authority == "localhost" || authority == "127.0.0.1";
+}
+
+bool https_url(const std::string& value) {
+    return value.starts_with("https://");
+}
+
+std::vector<std::string> split_scopes(const std::string& value) {
+    std::vector<std::string> result;
+    std::size_t offset = 0;
+    while (offset < value.size()) {
+        while (offset < value.size() && std::isspace(static_cast<unsigned char>(value[offset]))) {
+            ++offset;
+        }
+        const auto end = value.find_first_of(" \t\r\n", offset);
+        if (offset < value.size()) {
+            result.push_back(value.substr(offset, end == std::string::npos
+                                                     ? end : end - offset));
+        }
+        if (end == std::string::npos) break;
+        offset = end + 1;
+    }
+    return result;
+}
+
 std::string read_request_state_key_file(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) throw std::runtime_error("unable to open request-state key file");
@@ -180,6 +222,21 @@ std::string read_request_state_key_file(const std::string& path) {
         value.pop_back();
     }
     return parse_request_state_key(value);
+}
+
+std::string read_secret_file(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("unable to open introspection secret file");
+    std::string value((std::istreambuf_iterator<char>(input)),
+                      std::istreambuf_iterator<char>());
+    if (input.bad() || value.empty() || value.size() > 8192) {
+        throw std::runtime_error("introspection secret file is empty or too large");
+    }
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+        value.pop_back();
+    }
+    if (value.empty()) throw std::runtime_error("introspection secret file is empty");
+    return value;
 }
 
 bool parse_validate_output(const std::string& value) {
@@ -231,6 +288,11 @@ int main(int argc, char** argv) {
         cppmcp::examples::FeatureOptions feature_options;
         std::string tls_cert, tls_key;
         std::string request_state_key_file;
+        std::string introspection_url;
+        std::string introspection_client_id;
+        std::string introspection_secret_file;
+        std::chrono::seconds introspection_cache_ttl{30};
+        bool auth_insecure_http_for_testing = false;
         std::chrono::milliseconds tick_interval{0};
         std::chrono::milliseconds churn_interval{0};
         bool sdk_listener = false;
@@ -253,6 +315,53 @@ int main(int argc, char** argv) {
             else if (argument == "--json-only") options.handler.response_mode = cppmcp::transport::HttpResponseMode::json_only;
             else if (argument == "--sse-only") options.handler.response_mode = cppmcp::transport::HttpResponseMode::sse_only;
             else if (argument == "--token" && i + 1 < argc) options.bearer_token = argv[++i];
+            else if (argument == "--auth-issuer" && i + 1 < argc) {
+                if (!options.oauth) options.oauth.emplace();
+                options.oauth->authorization_servers.emplace_back(argv[++i]);
+            }
+            else if (argument == "--auth-resource" && i + 1 < argc) {
+                if (!options.oauth) options.oauth.emplace();
+                options.oauth->resource = argv[++i];
+            }
+            else if (argument == "--auth-scopes-supported" && i + 1 < argc) {
+                if (!options.oauth) options.oauth.emplace();
+                options.oauth->scopes_supported = split_scopes(argv[++i]);
+            }
+            else if (argument == "--auth-insecure-http-for-testing") {
+                auth_insecure_http_for_testing = true;
+            }
+            else if (argument == "--auth-jwks-min-refresh-s" && i + 1 < argc) {
+                if (!options.oauth) options.oauth.emplace();
+                const auto seconds = parse_size(argv[++i], "--auth-jwks-min-refresh-s");
+                if (seconds == 0) throw std::invalid_argument("--auth-jwks-min-refresh-s must be positive");
+                options.oauth->jwks_min_refresh = std::chrono::seconds(seconds);
+            }
+            else if (argument == "--auth-listing" && i + 1 < argc) {
+                if (!options.oauth) options.oauth.emplace();
+                const std::string policy = argv[++i];
+                if (policy != "show_all" && policy != "filter") {
+                    throw std::invalid_argument("--auth-listing must be show_all or filter");
+                }
+                options.oauth->filter_listings = policy == "filter";
+            }
+            else if (argument == "--auth-omit-resource-metadata-param") {
+                if (!options.oauth) options.oauth.emplace();
+                options.oauth->omit_resource_metadata_parameter = true;
+            }
+            else if (argument == "--auth-introspect-url" && i + 1 < argc) {
+                introspection_url = argv[++i];
+            }
+            else if (argument == "--auth-introspect-client-id" && i + 1 < argc) {
+                introspection_client_id = argv[++i];
+            }
+            else if (argument == "--auth-introspect-secret-file" && i + 1 < argc) {
+                introspection_secret_file = argv[++i];
+            }
+            else if (argument == "--auth-introspect-cache-s" && i + 1 < argc) {
+                const auto seconds = parse_size(argv[++i], "--auth-introspect-cache-s");
+                if (seconds == 0) throw std::invalid_argument("--auth-introspect-cache-s must be positive");
+                introspection_cache_ttl = std::chrono::seconds(seconds);
+            }
             else if (argument == "--tls-cert" && i + 1 < argc) tls_cert = argv[++i];
             else if (argument == "--tls-key" && i + 1 < argc) tls_key = argv[++i];
             else if (argument == "--request-state-key" && i + 1 < argc) options.request_state_key = parse_request_state_key(argv[++i]);
@@ -260,6 +369,59 @@ int main(int argc, char** argv) {
             else if (argument == "--validate-output" && i + 1 < argc) options.validate_output = parse_validate_output(argv[++i]);
             else if (argument == "--sdk-listener") sdk_listener = true;
             else throw std::invalid_argument("unknown or incomplete option: " + argument);
+        }
+        if (options.oauth) {
+            if (options.oauth->resource.empty() ||
+                options.oauth->authorization_servers.empty()) {
+                throw std::invalid_argument("OAuth requires --auth-resource and at least one --auth-issuer");
+            }
+            const auto validate_url = [&](const std::string& url, const char* label) {
+                if (!https_url(url) &&
+                    !(auth_insecure_http_for_testing && url.starts_with("http://") &&
+                      loopback_url(url))) {
+                    throw std::invalid_argument(std::string(label) +
+                                                " must use HTTPS except for the explicit loopback testing opt-in");
+                }
+            };
+            validate_url(options.oauth->resource, "--auth-resource");
+            for (const auto& issuer : options.oauth->authorization_servers) {
+                validate_url(issuer, "--auth-issuer");
+            }
+            options.handler.oauth = options.oauth;
+            if (!introspection_url.empty()) {
+                if (introspection_client_id.empty() ||
+                    introspection_secret_file.empty()) {
+                    throw std::invalid_argument(
+                        "introspection requires client id and a secret file");
+                }
+                cppmcp::auth::IntrospectionVerifierOptions introspection;
+                introspection.endpoint = std::move(introspection_url);
+                introspection.client_id = std::move(introspection_client_id);
+                introspection.client_secret = read_secret_file(introspection_secret_file);
+                introspection.issuers = options.oauth->authorization_servers;
+                introspection.resource = options.oauth->resource;
+                introspection.cache_ttl = introspection_cache_ttl;
+                introspection.network_policy.allow_http_loopback =
+                    auth_insecure_http_for_testing;
+                options.handler.token_verifier =
+                    std::make_shared<cppmcp::auth::IntrospectionVerifier>(
+                        std::move(introspection));
+            } else {
+                cppmcp::auth::JwtVerifierOptions jwt_options;
+                jwt_options.issuers = options.oauth->authorization_servers;
+                jwt_options.accepted_audiences = {options.oauth->resource};
+                jwt_options.min_jwks_refresh = options.oauth->jwks_min_refresh;
+                jwt_options.network_policy.allow_http_loopback =
+                    auth_insecure_http_for_testing;
+                options.handler.token_verifier =
+                    std::make_shared<cppmcp::auth::JwtVerifier>(
+                        std::move(jwt_options));
+            }
+            if (!https_url(options.oauth->resource) && !https_url(options.oauth->authorization_servers.front()) &&
+                options.bind_address != "127.0.0.1" &&
+                options.bind_address != "localhost" && !options.tls) {
+                std::cerr << "WARNING: OAuth is enabled on a non-loopback plain-HTTP bind\n";
+            }
         }
         if (options.request_state_key.empty()) {
             if (!request_state_key_file.empty()) {
@@ -413,7 +575,7 @@ int main(int argc, char** argv) {
             [&](const std::shared_ptr<cppmcp::transport::IHttpExchange>& exchange) {
                 const auto& request = exchange->request();
                 const auto target = request.target.substr(0, request.target.find('?'));
-                if (target == path && request.method == "POST") {
+                if (!options.oauth && target == path && request.method == "POST") {
                     if (!options.handler.authenticator || options.handler.authenticator(request)) {
                         const auto parsed = cppmcp::core::parse_message(request.body);
                         if (const auto* message = std::get_if<cppmcp::core::Message>(&parsed)) {

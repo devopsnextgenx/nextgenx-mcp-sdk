@@ -317,6 +317,77 @@ void test_http_handler() {
     CPPMCP_CHECK(response_json(*round_robin_b)["result"]["structuredContent"] == "B");
 }
 
+void test_prm_metadata_and_token_verifier() {
+    Server server({"auth-test-server", "Auth test server", "1.0"});
+    add_echo_tool(server);
+    cppmcp::auth::AuthContext auth_context;
+    auth_context.issuer = "https://issuer.example";
+    auth_context.subject = "alice";
+    auth_context.client_id = "test-client";
+    auth_context.audience = {"https://resource.example/mcp"};
+    auth_context.scopes = {"mcp:use"};
+    auto verifier = std::make_shared<cppmcp::auth::StaticBearerAuthenticator>(
+        "only-for-this-test", auth_context);
+    HttpHandlerOptions options;
+    options.token_verifier = verifier;
+    cppmcp::transport::OAuthResourceOptions oauth;
+    oauth.resource = "https://resource.example/mcp";
+    oauth.authorization_servers = {"https://issuer.example"};
+    oauth.scopes_supported = {"mcp:use", "files:read"};
+    McpHttpHandler handler(server, options, oauth);
+
+    HttpRequest prm_request;
+    prm_request.method = "GET";
+    prm_request.target = "/.well-known/oauth-protected-resource/mcp";
+    auto prm = std::make_shared<MockExchange>(std::move(prm_request));
+    handler.handle(prm);
+    CPPMCP_CHECK(prm->status == 200);
+    CPPMCP_CHECK(response_header(prm->headers, "Content-Type") != nullptr);
+    CPPMCP_CHECK(response_header(prm->headers, "Access-Control-Allow-Origin") != nullptr);
+    CPPMCP_CHECK(Json::parse(prm->body)["resource"] == oauth.resource);
+    CPPMCP_CHECK(Json::parse(prm->body)["authorization_servers"][0] ==
+                  oauth.authorization_servers[0]);
+
+    HttpRequest missing_request;
+    missing_request.method = "POST";
+    missing_request.target = "/mcp";
+    auto missing = std::make_shared<MockExchange>(std::move(missing_request));
+    handler.handle(missing);
+    const auto* missing_challenge = response_header(missing->headers, "WWW-Authenticate");
+    CPPMCP_CHECK(missing->status == 401);
+    CPPMCP_CHECK(missing_challenge != nullptr);
+    if (missing_challenge) {
+        CPPMCP_CHECK(missing_challenge->find("scope=\"mcp:use\"") != std::string::npos);
+        CPPMCP_CHECK(missing_challenge->find("resource_metadata=\"https://resource.example/.well-known/oauth-protected-resource/mcp\"") != std::string::npos);
+        CPPMCP_CHECK(missing_challenge->find("error=") == std::string::npos);
+    }
+
+    auto valid_request = make_request("tools/list");
+    valid_request.headers.emplace_back("Authorization", "bearer only-for-this-test");
+    auto valid = std::make_shared<MockExchange>(std::move(valid_request));
+    handler.handle(valid);
+    CPPMCP_CHECK(valid->status == 200);
+
+    auto invalid_request = make_request("tools/list");
+    invalid_request.headers.emplace_back("Authorization", "Bearer wrong");
+    auto invalid = std::make_shared<MockExchange>(std::move(invalid_request));
+    handler.handle(invalid);
+    const auto* invalid_challenge = response_header(invalid->headers, "WWW-Authenticate");
+    CPPMCP_CHECK(invalid->status == 401);
+    CPPMCP_CHECK(invalid_challenge != nullptr);
+    if (invalid_challenge) {
+        CPPMCP_CHECK(invalid_challenge->find("error=\"invalid_token\"") != std::string::npos);
+        CPPMCP_CHECK(invalid_challenge->find("wrong") == std::string::npos);
+    }
+
+    auto duplicate_request = make_request("tools/list");
+    duplicate_request.headers.emplace_back("Authorization", "Bearer only-for-this-test");
+    duplicate_request.headers.emplace_back("authorization", "Bearer only-for-this-test");
+    auto duplicate = std::make_shared<MockExchange>(std::move(duplicate_request));
+    handler.handle(duplicate);
+    CPPMCP_CHECK(duplicate->status == 400);
+}
+
 void test_http_handler_header_params_stateless() {
     const auto make_tool = [](std::string instance_value) {
         return cppmcp::ToolDefinition{

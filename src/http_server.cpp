@@ -655,11 +655,13 @@ void AsioExecutor::post(std::function<void()> task) {
 
 struct HttpServerHandle::Impl {
     Impl(Server& server, const HttpOptions& server_options)
-        : options(server_options), handler(server, options.handler), acceptor(context) {
+        : options(server_options), handler(server, options.handler, options.oauth),
+          acceptor(context) {
         const auto address = asio::ip::make_address(options.bind_address);
         const bool protected_remote = options.tls.has_value() ||
                                       !options.bearer_token.empty() ||
-                                      static_cast<bool>(options.handler.authenticator);
+                                      static_cast<bool>(options.handler.authenticator) ||
+                                      options.oauth.has_value();
         if (!address.is_loopback() && !protected_remote &&
             !options.allow_insecure_remote && !options.allow_non_loopback) {
             throw std::invalid_argument(

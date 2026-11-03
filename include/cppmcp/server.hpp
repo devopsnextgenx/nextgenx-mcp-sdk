@@ -13,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "cppmcp/auth/auth_context.hpp"
 #include "cppmcp/core/json_rpc.hpp"
 #include "cppmcp/core/json_schema.hpp"
 #include "cppmcp/core/meta.hpp"
@@ -188,6 +189,8 @@ public:
     bool can_request_input() const noexcept;
     void set_request_subject(std::string subject);
     const std::string& request_subject() const noexcept;
+    void set_auth_context(auth::AuthContext context);
+    [[nodiscard]] const auth::AuthContext* auth() const noexcept;
     bool cancelled() const noexcept;
     std::stop_token cancellation_token() const noexcept;
 
@@ -209,6 +212,7 @@ private:
     nlohmann::json client_capabilities_ = nlohmann::json::object();
     std::function<nlohmann::json(const nlohmann::json&)> input_request_handler_;
     std::string request_subject_ = "anonymous";
+    std::optional<auth::AuthContext> auth_context_;
 };
 
 using ContextToolHandler = std::function<ToolHandlerResult(

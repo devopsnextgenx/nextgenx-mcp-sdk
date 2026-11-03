@@ -459,6 +459,17 @@ const std::string& ToolContext::request_subject() const noexcept {
     return request_subject_;
 }
 
+void ToolContext::set_auth_context(auth::AuthContext context) {
+    auth_context_ = std::move(context);
+    if (!auth_context_->issuer.empty() && !auth_context_->subject.empty()) {
+        set_request_subject(auth_context_->issuer + "|" + auth_context_->subject);
+    }
+}
+
+const auth::AuthContext* ToolContext::auth() const noexcept {
+    return auth_context_ ? &*auth_context_ : nullptr;
+}
+
 std::stop_token ToolContext::cancellation_token() const noexcept {
     return cancellation_;
 }

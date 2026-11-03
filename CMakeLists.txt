@@ -82,6 +82,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(llhttp)
 
 set(CPPMCP_SOURCES
+    src/auth.cpp
     src/json_rpc.cpp
     src/json_schema.cpp
     src/request_state.cpp
@@ -111,6 +112,9 @@ set(CPPMCP_TRANSPORT_STDIO_SOURCES
 )
 
 set(CPPMCP_TRANSPORT_HTTP_SOURCES
+    src/network_policy.cpp
+    src/jwt_verifier.cpp
+    src/introspection_verifier.cpp
     src/http_handler.cpp
     src/http_client.cpp
     src/http_server.cpp
@@ -385,6 +389,12 @@ endif()
 
 if(CPPMCP_BUILD_TESTS)
     enable_testing()
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    configure_file(tests/test_authserver.py
+                   "${CMAKE_CURRENT_BINARY_DIR}/test_authserver" COPYONLY)
+    file(CHMOD "${CMAKE_CURRENT_BINARY_DIR}/test_authserver"
+         PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
+                    GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
     FetchContent_Declare(
         json_schema_suite
         URL https://codeload.github.com/json-schema-org/JSON-Schema-Test-Suite/tar.gz/89e83a74014617ffbe79a56d83d14d054cd11417
@@ -460,7 +470,7 @@ if(CPPMCP_BUILD_TESTS)
             progress logging
             phase2_memory phase2_stdio
             client_prompts client_resources client_completion client_cache client_resubscribe
-            http_handler http_handler_mcp_param_stateless http_handler_mcp_param_types
+            http_handler prm_handler_auth http_handler_mcp_param_stateless http_handler_mcp_param_types
             cancellation
             http_server_methods http_server_host_origin
             http_server_smuggling http_server_slowloris http_server_auth_route_bind

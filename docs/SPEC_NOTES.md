@@ -185,6 +185,53 @@ unrestricted Draft 2020-12. See [SECURITY.md](SECURITY.md).
   the authorization flow.
 - stdio credentials come from the environment instead of the HTTP OAuth flow.
 
+#### Phase 6 source review
+
+The [2026-07-28 authorization specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+states: “MCP servers **MUST** implement OAuth 2.0 Protected Resource Metadata
+(RFC 9728).” Its [Authorization Server Discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)
+page requires `authorization_servers` to contain at least one entry. It also
+requires clients to prefer a `resource_metadata` URL from `WWW-Authenticate`
+and otherwise try both the path-inserted and root PRM URIs.
+
+For issuer URLs with paths, the discovery document requires this exact order:
+path-inserted OAuth AS metadata; path-inserted OIDC configuration; then OIDC
+configuration appended to the issuer path. For pathless issuers, it requires
+OAuth AS metadata followed by OIDC configuration. The document says the
+metadata `issuer` “**MUST** be identical to the issuer identifier used to
+construct the well-known URL” and that mismatched metadata “**MUST NOT**” be
+used. Those are exact string identity checks, not URL normalization.
+
+The [client registration specification](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration)
+gives the preference order as pre-registration, CIMD when advertised, DCR as a
+fallback, then prompting the user. It says CIMD documents “**MUST** include at
+least” `client_id`, `client_name`, and `redirect_uris`, with the `client_id`
+matching its URL exactly. DCR is deprecated for compatibility; local clients
+use `application_type: "native"`.
+
+The [authorization security considerations](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations)
+state that MCP servers “**MUST** validate that tokens presented to them were
+specifically issued for their use,” all authorization-server endpoints “**MUST**
+be served over HTTPS,” and redirect URIs “**MUST** be either `localhost` or
+use HTTPS.” PKCE support is discovered from metadata; if
+`code_challenge_methods_supported` is absent, clients “**MUST** refuse to
+proceed.” The same text requires S256 when the client is technically capable.
+The [RFC 8707 resource indicator](https://www.rfc-editor.org/rfc/rfc8707.html)
+therefore belongs on both the authorization and access-token requests.
+
+The [RFC 9207 issuer-identification RFC](https://datatracker.ietf.org/doc/html/rfc9207)
+defines response parameter `iss` as a countermeasure to authorization-server
+mix-up. The MCP authorization text additionally requires state verification
+and issuer comparison before sending an authorization code to a token endpoint.
+The [RFC 7662 introspection RFC](https://datatracker.ietf.org/doc/html/rfc7662)
+defines active-token metadata retrieval for opaque tokens. The
+[OAuth Client Credentials extension](https://github.com/modelcontextprotocol/ext-auth/blob/main/specification/stable/oauth-client-credentials/2026-07-28/oauth-client-credentials.mdx)
+is optional; when adopted it requires baseline authorization compliance and
+pre-registered credentials, with no DCR in that flow.
+
+These sources are versioned separately. Re-check the dated MCP pages, RFCs,
+and extension revision before extending the client flow in slice 3.
+
 ### MCP Apps
 
 - MCP Apps is an extension, not part of the core protocol. Its resource URI is
