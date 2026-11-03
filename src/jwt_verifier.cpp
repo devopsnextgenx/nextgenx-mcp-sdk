@@ -1,4 +1,5 @@
 #include "cppmcp/auth/jwt_verifier.hpp"
+#include "cppmcp/auth/scope_authorization.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -162,15 +163,23 @@ std::set<std::string> scope_values(const Json& claims) {
     std::set<std::string> result;
     if (const auto scope = claims.find("scope"); scope != claims.end()) {
         if (!scope->is_string()) throw TokenVerificationError("invalid JWT scope claim");
-        std::istringstream input(scope->get<std::string>());
-        for (std::string item; input >> item;) result.insert(std::move(item));
+        try {
+            const auto parsed = parse_scope_set(scope->get_ref<const std::string&>());
+            result.insert(parsed.begin(), parsed.end());
+        } catch (const std::invalid_argument&) {
+            throw TokenVerificationError("invalid JWT scope claim");
+        }
     }
     for (const auto* key : {"scp", "scopes"}) {
         if (const auto values = claims.find(key); values != claims.end()) {
             if (!values->is_array()) throw TokenVerificationError("invalid JWT scopes claim");
             for (const auto& item : *values) {
                 if (!item.is_string()) throw TokenVerificationError("invalid JWT scopes claim");
-                result.insert(item.get<std::string>());
+                const auto scope = item.get<std::string>();
+                if (!valid_scope_token(scope)) {
+                    throw TokenVerificationError("invalid JWT scopes claim");
+                }
+                result.insert(scope);
             }
         }
     }

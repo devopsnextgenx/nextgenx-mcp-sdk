@@ -115,6 +115,7 @@ set(CPPMCP_TRANSPORT_HTTP_SOURCES
     src/network_policy.cpp
     src/jwt_verifier.cpp
     src/introspection_verifier.cpp
+    src/oauth_metadata.cpp
     src/oauth_provider.cpp
     src/http_handler.cpp
     src/http_client.cpp
@@ -282,6 +283,15 @@ if(CPPMCP_BUILD_FUZZERS)
 
     cppmcp_add_fuzzer(cppmcp_fuzz_subscription_filter fuzz/subscription_filter_fuzz.cpp)
     target_link_libraries(cppmcp_fuzz_subscription_filter PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_jwt_parser fuzz/jwt_parser_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_jwt_parser PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_oauth_metadata fuzz/oauth_metadata_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_oauth_metadata PRIVATE cppmcp::transport_http)
+
+    cppmcp_add_fuzzer(cppmcp_fuzz_scope_set fuzz/scope_set_fuzz.cpp)
+    target_link_libraries(cppmcp_fuzz_scope_set PRIVATE cppmcp::core)
 endif()
 
 if(CPPMCP_BUILD_SHARED)
@@ -433,6 +443,7 @@ if(CPPMCP_BUILD_TESTS)
         tests/cancellation_test.cpp
         tests/sse_parser_test.cpp
         tests/www_auth_test.cpp
+        tests/auth_phase6_test.cpp
         tests/subscription_registry_test.cpp
         tests/phase3d_test.cpp
         tests/phase5_test.cpp
@@ -489,6 +500,7 @@ if(CPPMCP_BUILD_TESTS)
             dual_mode_runtime dual_mode_server_compat ttl_cache_scope ttl_server_window
             ttl_probe ttl_freshness expiry_reconnect expiry_cleanup expiry_session_timer
             expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth listen
+            client_mrtr_prompt client_mrtr_resource
             sse_parser_cr_endings sse_parser_field_semantics sse_parser_id_persistence
             sse_parser_retry_digits sse_parser_truncated_dispatch sse_parser_size_limit
             www_auth_multi_challenge www_auth_quoted_escapes www_auth_fields
@@ -498,6 +510,32 @@ if(CPPMCP_BUILD_TESTS)
             listen_no_unrequested_types backoff_base backoff_cap backoff_jitter
             tls_min_version tls_missing_certificate hostname tls_expired_certificate
             tls_truncated_stream www_auth_listener_retry)
+        add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
+    endforeach()
+    foreach(test_name IN ITEMS
+            prm_metadata_00 prm_metadata_01 prm_metadata_02 prm_metadata_03
+            jwt_parser_00 jwt_parser_01 jwt_parser_02 jwt_parser_03 jwt_parser_04
+            jwt_parser_05 jwt_parser_06 jwt_parser_07 jwt_parser_08 jwt_parser_09
+            jwt_parser_10 jwt_parser_11 jwt_parser_12 jwt_parser_13 jwt_parser_14
+            jwks_policy_00 jwks_policy_01 jwks_policy_02 jwks_policy_03
+            introspection_config_00 introspection_config_01 introspection_config_02
+            introspection_config_03 introspection_config_04
+            scope_hierarchy_00 scope_hierarchy_01 scope_hierarchy_02 scope_hierarchy_03
+            scope_single_challenge_00 scope_single_challenge_01
+            scope_parser_00 scope_parser_01
+            session_binding_00 session_binding_01 session_binding_02
+            www_authenticate_00 www_authenticate_01 www_authenticate_02
+            www_authenticate_03 www_authenticate_04
+            oauth_discovery_00 oauth_discovery_01 oauth_discovery_02 oauth_discovery_03
+            oauth_pkce_00 oauth_pkce_01 oauth_pkce_02
+            oauth_iss_00 oauth_iss_01 oauth_iss_02 oauth_iss_03
+            oauth_stepup_00 oauth_stepup_01 oauth_stepup_02
+            oauth_refresh_00 oauth_refresh_01 oauth_refresh_02
+            oauth_single_flight_00 oauth_single_flight_01
+            oauth_store_issuer_00 oauth_store_issuer_01 oauth_store_issuer_02
+            oauth_store_issuer_03
+            oauth_ssrf_00 oauth_ssrf_01 oauth_ssrf_02 oauth_ssrf_03 oauth_ssrf_04
+            token_passthrough_00 token_passthrough_01 token_redaction_00)
         add_test(NAME cppmcp_${test_name}_test COMMAND cppmcp_core_tests ${test_name})
     endforeach()
     foreach(test_name IN ITEMS

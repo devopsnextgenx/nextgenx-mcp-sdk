@@ -24,6 +24,7 @@ struct RequestView {
 using DynamicScopeRequirements = std::function<ScopeSet(const RequestView&)>;
 
 [[nodiscard]] bool valid_scope_token(std::string_view scope) noexcept;
+[[nodiscard]] ScopeSet parse_scope_set(std::string_view value);
 void validate_scope_set(const ScopeSet& scopes);
 
 class ScopeHierarchy {

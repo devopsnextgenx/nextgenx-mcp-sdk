@@ -11,6 +11,7 @@
 #include <string_view>
 #include <tuple>
 #include <utility>
+#include <vector>
 
 #include "cppmcp/auth/scope_authorization.hpp"
 #include "cppmcp/net/network_policy.hpp"
@@ -163,6 +164,8 @@ struct OAuthProviderOptions {
     std::shared_ptr<ITokenStore> token_store;
     std::shared_ptr<ClientRegistrationStore> registrations;
     std::shared_ptr<IClientInfoPrompt> registration_prompt;
+    std::function<std::string(const std::vector<std::string>&)>
+        authorization_server_selector;
     std::shared_ptr<IUserAgentLauncher> user_agent_launcher;
     std::function<void(std::string_view)> event_handler;
 };

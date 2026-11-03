@@ -1,9 +1,8 @@
 # MCP specification notes
 
-This document records the source-of-truth review for the first cppmcp phase. The
-specification, schema, and extension are versioned separately; each implementation
-phase must re-check the relevant sources rather than assuming this snapshot is
-still current.
+This document records source-of-truth reviews for the implemented cppmcp
+phases. The specification, schema, RFCs, and extensions are versioned
+separately; re-check the relevant sources before extending the implementation.
 
 ## Sources reviewed
 
@@ -14,6 +13,10 @@ still current.
 - [2026-07-28 schema.ts](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts)
 - [MCP Apps overview](https://modelcontextprotocol.io/docs/extensions/apps) and [MCP Apps extension specification](https://github.com/modelcontextprotocol/ext-apps/blob/main/specification/2026-01-26/apps.mdx)
 - [MCP authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization)
+- [Authorization Server Discovery](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/authorization-server-discovery)
+- [Client Registration](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/client-registration)
+- [Authorization Security Considerations](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/security-considerations)
+- [OAuth Client Credentials extension, 2026-07-28](https://github.com/modelcontextprotocol/ext-auth/blob/main/specification/stable/oauth-client-credentials/2026-07-28/oauth-client-credentials.mdx)
 - [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728), [RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414), [RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707), [RFC 9207](https://datatracker.ietf.org/doc/html/rfc9207), [RFC 7636](https://datatracker.ietf.org/doc/html/rfc7636), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1), [RFC 7662](https://datatracker.ietf.org/doc/html/rfc7662), and [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)
 - [MCP conformance suite](https://github.com/modelcontextprotocol/conformance)
 
@@ -178,11 +181,11 @@ unrestricted Draft 2020-12. See [SECURITY.md](SECURITY.md).
   Metadata (RFC 9728). Clients use that metadata to discover authorization
   servers and support OAuth Authorization Server Metadata (RFC 8414) and
   OpenID Connect discovery.
-- Client registration preference is Client ID Metadata Documents, then
-  pre-registration, then Dynamic Client Registration (RFC 7591) as a
-  deprecated compatibility fallback. Authorization Code with PKCE, a
-  resource indicator (RFC 8707), and issuer validation (RFC 9207) are part of
-  the authorization flow.
+- Client registration preference is pre-registration, then Client ID Metadata
+  Documents when advertised, then Dynamic Client Registration (RFC 7591) as a
+  deprecated compatibility fallback, then prompting. Authorization Code with
+  PKCE, a resource indicator (RFC 8707), and issuer validation (RFC 9207) are
+  part of the authorization flow.
 - stdio credentials come from the environment instead of the HTTP OAuth flow.
 
 #### Phase 6 source review
@@ -229,8 +232,23 @@ defines active-token metadata retrieval for opaque tokens. The
 is optional; when adopted it requires baseline authorization compliance and
 pre-registered credentials, with no DCR in that flow.
 
-These sources are versioned separately. Re-check the dated MCP pages, RFCs,
-and extension revision before extending the client flow in slice 3.
+The [client-credentials extension, revision 2026-07-28](https://github.com/modelcontextprotocol/ext-auth/blob/main/specification/stable/oauth-client-credentials/2026-07-28/oauth-client-credentials.mdx)
+labels the grant optional. It says client credentials are established out of
+band and DCR is not used for that grant. It describes private-key JWT as
+recommended and client-secret authentication in the request content; its
+metadata requirements name `private_key_jwt` or `client_secret_basic`. This
+wording does not fully align with the Phase 6 prompt's explicit request for
+Basic client authentication. The implementation supports the requested
+client-secret Basic path and secret-post where configured, but does not claim
+private-key JWT extension conformance; see [DECISIONS.md](DECISIONS.md).
+
+Representative source requirements quoted above: servers “MUST implement
+OAuth 2.0 Protected Resource Metadata”; `authorization_servers` “MUST contain
+at least one authorization server”; PKCE clients “MUST refuse to proceed” if
+the metadata does not advertise supported methods; and metadata `issuer` “MUST
+be identical” to the issuer identifier used to construct the well-known URL.
+These are normative requirements, not implementation suggestions. Re-check the
+dated MCP pages, RFCs, and extension revision before extending the flow.
 
 ### MCP Apps
 

@@ -2,61 +2,49 @@
 
 ## Status
 
-Slices 1 through 3 and the carry-over are complete. Slice 1 adds a test-only
-OAuth authorization server, path-inserted/root Protected Resource Metadata,
-bearer challenges, static/JWT/introspection verifier interfaces, a bounded JWKS
-refresh path, outbound DNS-pinned network policy, request `AuthContext`,
-legacy session principal binding, and auth CLI configuration guards.
+Slices 1 through 4 and the accepted carry-over are implemented. The
+user-provided `scripts/verify_6.sh` remains untouched and is not included in
+commits.
 
-Slice 2 adds static and dynamic scope requirements to tool, prompt, resource
-and template builders; transitive scope hierarchy; one aggregated insufficient
-scope challenge; optional filtered listings; and stream closure at token
-expiry. The HTTP handler parses JSON before authentication, applies operation
-authorization before dispatch, and re-authorizes every continuation. The
-prompt/resource typed client MRTR continuations use a registered
-`ElicitationHandler`, validate form schemas, and share the tool-call round
-limit error behavior.
+- Carry-over: typed `Client` now drives prompt and resource MRTR continuations
+  with the registered elicitation handler and the existing round/error limits.
+- Slice 1: resource metadata, bearer challenges, `ITokenVerifier`,
+  `AuthContext`, JWT/JWKS and introspection verification, outbound DNS-pinned
+  `NetworkPolicy`, HTTP enforcement, session principal binding, configuration
+  guards, and the test-only authorization server.
+- Slice 2: static/dynamic scope requirements, hierarchy, aggregated 403
+  challenges, listing filter option, stream expiry, and request-state
+  authenticated subject binding.
+- Slice 3: OAuth discovery and registration, authorization-code PKCE,
+  client_credentials, RFC 9207 validation, issuer/resource/client-keyed token
+  storage, refresh rotation, single-flight, step-up, CLI flow events, repeat
+  and parallel calls.
+- Slice 4: shared bounded metadata/scope parsing, 15 fuzz targets, 422 CTest
+  cases, OAuth and security guides, spec notes, evidence, and interop records.
 
-The shared network policy explicitly blocks IPv4-mapped IPv6 destinations by
-default; enabling mapped addresses is a separate opt-in from the loopback-only
-HTTP testing exception. The public auth API also includes the
-`ITokenExchanger` interface for obtaining a distinct upstream credential.
+The Phase 5B commit at `2078252` was present at start. The implementation
+commits through slice 3 are `89a1ae3`, `199642b`, `470ac8e`, and `56dd37e`.
+The original CTest baseline was 342; current CTest discovery and execution
+report 422 tests.
 
-Slice 3 adds the public `OAuthProvider`, issuer-keyed in-memory/file token and
-registration stores, PRM and authorization-server discovery, PKCE authorization
-code and `client_credentials` grants, loopback/CIMD/DCR registration,
-state/RFC 9207 issuer validation, refresh-token rotation, step-up, and the HTTP
-client example's OAuth, repeat, and parallel-call flags. Redirect handling in
-the test launcher is explicit and limited to the exact loopback callback URL.
+## Final verification
 
-The Phase 5B commit is present at `2078252`; the carry-over commit is
-`89a1ae3`. Starting CTest baseline was 342 passing tests; current CTest has 343
-passing tests from the earlier slices. The working tree was not clean at task
-start because the provided `scripts/verify_6.sh` was untracked; it has been
-left untouched and excluded from commits.
+`timeout 1800 scripts/verify_6.sh --slice 4 --sanitizers --interop </dev/null`
+passed with `RESULT: 134 passed, 0 failed, 2 warnings`. The warnings are
+recorded in [6_EVIDENCE.md](6_EVIDENCE.md): Inspector without credentials
+returned text not recognized by the gate's 401 matcher, and Claude Code OAuth
+login requires a manual interactive run.
 
-## Latest verification
+Both address/undefined and thread sanitizer suites passed. All 15 fuzz targets
+built with Clang; the new JWT, OAuth metadata, and scope-set targets each
+completed 1,000 smoke runs. The Phase 5 regression gate passed 107 checks.
+The Phase 5B regression gate passed 86 checks with one warning because the
+optional external conformance command was not configured. See
+[6_EVIDENCE.md](6_EVIDENCE.md) for commands and complete results.
 
-`scripts/verify_6.sh --slice 3` (includes slices 1 and 2):
+## Remaining interop limitation
 
-```text
-  PASS: stored token reused across runs (no second authorization)
-  PASS: token store file mode 0600
-  PASS: store entries are keyed by issuer
-  PASS: credentials of AS-A were not reused at AS-B (separate DCR)
-  PASS: falls back to well-known probing when resource_metadata is absent
-  PASS: PRM whose resource differs from the server URL is rejected
-  PASS: SSRF: private-range authorization server blocked without connecting (0s)
-  PASS: client_credentials flow works (resource-bound)
-RESULT: 97 passed, 0 failed, 0 warnings (logs: /tmp/tmp.raPtGPmxBk)
-```
-
-The slice gate configured and built the project successfully. CTest for this
-slice has not yet been run; the slice 4 gate includes CTest and sanitizer runs.
-
-## Next action
-
-Add the remaining slice 4 test and fuzz coverage, complete the authentication
-guides and evidence/interop records, then run
-`scripts/verify_6.sh --slice 4 --sanitizers --interop` and the Phase 5/5B
-regression gates.
+The MCP Inspector bearer-header check passed. The required manual Claude Code
+OAuth login was not run because it requires interactive browser/consent
+authorization; previous Claude Code entries in [INTEROP.md](INTEROP.md) verify
+connection health only.

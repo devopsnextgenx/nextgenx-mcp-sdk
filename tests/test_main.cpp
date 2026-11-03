@@ -120,6 +120,7 @@ void test_tls_expired_certificate();
 void test_tls_truncated_stream();
 void test_www_auth_listener_retry();
 void test_phase5_case(std::string_view name);
+void test_auth_phase6_case(std::string_view name);
 
 namespace {
 
@@ -276,6 +277,22 @@ int main(int argc, char** argv) {
     run_selected("tls_expired_certificate", test_tls_expired_certificate);
     run_selected("tls_truncated_stream", test_tls_truncated_stream);
     run_selected("www_auth_listener_retry", test_www_auth_listener_retry);
+    if (selected.starts_with("prm_metadata_") || selected.starts_with("jwt_parser_") ||
+        selected.starts_with("jwks_policy_") || selected.starts_with("introspection_config_") ||
+        selected.starts_with("scope_hierarchy_") ||
+        selected.starts_with("scope_single_challenge_") ||
+        selected.starts_with("scope_parser_") || selected.starts_with("session_binding_") ||
+        selected.starts_with("www_authenticate_") ||
+        selected.starts_with("oauth_discovery_") || selected.starts_with("oauth_pkce_") ||
+        selected.starts_with("oauth_iss_") || selected.starts_with("oauth_stepup_") ||
+        selected.starts_with("oauth_refresh_") ||
+        selected.starts_with("oauth_single_flight_") ||
+        selected.starts_with("oauth_store_issuer_") || selected.starts_with("oauth_ssrf_") ||
+        selected.starts_with("token_passthrough_") ||
+        selected.starts_with("token_redaction_")) {
+        found = true;
+        run(selected.c_str(), [&] { test_auth_phase6_case(selected); });
+    }
     if (selected.starts_with("phase5_")) {
         found = true;
         run(selected.c_str(), [&] { test_phase5_case(std::string_view(selected).substr(7)); });

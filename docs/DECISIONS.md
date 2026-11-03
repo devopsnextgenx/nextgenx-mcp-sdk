@@ -186,3 +186,33 @@
 - A remote bind must be protected by TLS or an authenticator unless
   `allow_insecure_remote` explicitly opts out. The example server's
   `--allow-insecure-remote` flag is intentionally noisy in deployment guidance.
+
+## Phase 6 OAuth
+
+- OAuth is opt-in and limited to HTTP. Stdio continues to obtain credentials
+  from application/environment configuration.
+- Resource-server verification is audience-bound to the canonical resource
+  URI. The verified `AuthContext` intentionally has no raw-token accessor;
+  applications must use `ITokenExchanger` for a separate upstream token rather
+  than forwarding the MCP credential.
+- Scope requirements are evaluated after request parsing and before dispatch.
+  `mcp:use` is the global default; the example hierarchy is explicit and
+  transitive. Listing defaults to `show_all` so clients can discover operations
+  and step up, with `filter` available where name disclosure is undesirable.
+- OAuth metadata, JWKS, introspection, registration, and CIMD fetches share
+  `NetworkPolicy`: DNS is resolved once, addresses are checked before
+  connection, redirects are not followed automatically, and loopback HTTP is
+  opt-in for tests only.
+- Registrations are keyed by exact issuer; tokens by issuer, resource, and
+  client ID. The file store uses atomic replacement and restrictive mode, with
+  optional AES-256-GCM encryption. OS keychain integration remains deferred.
+- The client-credentials grant is available with client-secret authentication
+  and resource binding, but private-key JWT is not implemented. The 2026-07-28
+  optional ext-auth text recommends private-key JWT and has differing wording
+  about client-secret transport versus the prompt's Basic requirement. The
+  current API supports the prompt's Basic mode (and configured secret-post);
+  it does not claim complete conformance to the optional extension until
+  private-key JWT assertion generation is added.
+- CIMD's HTTPS requirement remains the production rule. A loopback-hosted
+  document is accepted only behind the explicit client test option for local
+  fixtures; it is not a production deployment pattern.

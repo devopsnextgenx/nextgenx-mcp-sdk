@@ -1,4 +1,5 @@
 #include "cppmcp/client/oauth_provider.hpp"
+#include "cppmcp/client/oauth_metadata.hpp"
 
 #include <asio.hpp>
 #include <openssl/crypto.h>
@@ -240,19 +241,7 @@ std::string sha256_base64url(std::string_view value) {
 }
 
 auth::ScopeSet split_scopes(std::string_view value) {
-    auth::ScopeSet result;
-    while (!value.empty()) {
-        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
-            value.remove_prefix(1);
-        }
-        const auto end = value.find_first_of(" \t\r\n");
-        const auto token = value.substr(0, end);
-        if (!token.empty()) result.emplace(token);
-        if (end == std::string_view::npos) break;
-        value.remove_prefix(end);
-    }
-    auth::validate_scope_set(result);
-    return result;
+    return auth::parse_scope_set(value);
 }
 
 std::string join_scopes(const auth::ScopeSet& scopes) {
@@ -275,9 +264,7 @@ Json fetch_json(const std::string& url, const net::NetworkPolicy& policy) {
         throw std::runtime_error("OAuth metadata request failed with HTTP " +
                                  std::to_string(response.status));
     }
-    auto value = Json::parse(response.body);
-    if (!value.is_object()) throw std::runtime_error("OAuth metadata must be a JSON object");
-    return value;
+    return parse_oauth_metadata_document(response.body);
 }
 
 net::HttpResponse post_form(const std::string& url, const net::NetworkPolicy& policy,
@@ -931,27 +918,43 @@ struct OAuthProvider::Impl {
         if (issuer) return;
         prm = fetch_resource_metadata(challenge);
         const auto& servers = prm.at("authorization_servers");
-        if (!servers[0].is_string()) fail("prm_missing", "authorization server issuer is invalid");
-        const auto selected_issuer = servers[0].get<std::string>();
+        std::vector<std::string> available_issuers;
+        for (const auto& server : servers) {
+            if (!server.is_string()) {
+                fail("prm_missing", "authorization server issuer is invalid");
+            }
+            available_issuers.push_back(server.get<std::string>());
+        }
+        const auto selected_issuer =
+            options.authorization_server_selector
+                ? options.authorization_server_selector(available_issuers)
+                : available_issuers.front();
+        if (std::find(available_issuers.begin(), available_issuers.end(),
+                      selected_issuer) == available_issuers.end()) {
+            fail("prm_missing", "authorization server selection is not in PRM metadata");
+        }
         validate_endpoint_url(selected_issuer, options.allow_insecure_loopback);
-        issuer = selected_issuer;
-        emit("AUTH as " + *issuer);
-        metadata = discover_as(*issuer);
-        const auto authorization = metadata.value("authorization_endpoint", std::string{});
-        const auto token_endpoint = metadata.value("token_endpoint", std::string{});
+        auto discovered_metadata = discover_as(selected_issuer);
+        const auto authorization =
+            discovered_metadata.value("authorization_endpoint", std::string{});
+        const auto token_endpoint =
+            discovered_metadata.value("token_endpoint", std::string{});
         if (authorization.empty() || token_endpoint.empty()) {
             fail("issuer_mismatch", "authorization-server metadata lacks required endpoints");
         }
         validate_endpoint_url(authorization, options.allow_insecure_loopback);
         validate_endpoint_url(token_endpoint, options.allow_insecure_loopback);
-        metadata_url = token_endpoint;
         if (options.grant_type == "authorization_code") {
-            const auto methods = metadata.find("code_challenge_methods_supported");
-            if (methods == metadata.end() || !methods->is_array() ||
+            const auto methods = discovered_metadata.find("code_challenge_methods_supported");
+            if (methods == discovered_metadata.end() || !methods->is_array() ||
                 std::find(methods->begin(), methods->end(), Json("S256")) == methods->end()) {
                 throw PkceUnsupported();
             }
         }
+        issuer = selected_issuer;
+        metadata = std::move(discovered_metadata);
+        metadata_url = token_endpoint;
+        emit("AUTH as " + *issuer);
     }
 
     std::string resource_scope_fallback() const {
@@ -1272,7 +1275,7 @@ struct OAuthProvider::Impl {
         if (!challenge.scope.empty()) return split_scopes(challenge.scope);
         const auto fallback = resource_scope_fallback();
         if (!fallback.empty()) return split_scopes(fallback);
-        return options.requested_scopes;
+        return {};
     }
 
     void authorize(const auth::ScopeSet& scopes) {
@@ -1289,7 +1292,6 @@ struct OAuthProvider::Impl {
             if (!token->refresh_token.empty() && refresh_token()) return;
         }
         auto scopes = challenged_scopes(challenge);
-        if (scopes.empty()) scopes = options.requested_scopes;
         authorize(scopes);
     }
 
@@ -1352,7 +1354,6 @@ struct OAuthProvider::Impl {
                        challenge.error.empty()) {
                 return AuthAction::retry;
             }
-            if (desired.empty()) desired = options.requested_scopes;
             authorize(desired);
             return AuthAction::retry;
         } catch (const net::BlockedAddress& error) {

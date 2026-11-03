@@ -77,7 +77,8 @@ no raw-token accessor. `ITokenExchanger` is the appropriate application-level
 boundary for obtaining a separate upstream token; do not forward the inbound
 MCP access token to another service.
 
-`JwtVerifier` uses an explicit algorithm allow-list (RS256, PS256, ES256 and
+JWT algorithm confusion is prevented by an explicit allow-list in `JwtVerifier`
+(RS256, PS256, ES256 and
 EdDSA by default), requires key/algorithm type agreement and rejects `none`,
 HMAC algorithms and token-supplied key locations/material (`crit`, `jku`,
 `x5u`, `jwk`). It checks exact configured issuer strings, resource audience,
@@ -85,7 +86,8 @@ expiration and optional time claims before returning an `AuthContext`. Keep the
 allow-list narrow and never add HMAC for a verifier that accepts RSA public
 keys.
 
-JWKS, metadata and introspection fetches use `cppmcp::net::NetworkPolicy`.
+SSRF protection for JWKS, metadata and introspection fetches uses
+`cppmcp::net::NetworkPolicy`.
 The policy resolves once, validates every returned address, and connects to the
 resolved endpoint rather than resolving again at connect time. It blocks
 loopback/private/link-local/CGNAT and metadata ranges by default, disallows
@@ -104,9 +106,32 @@ the authorization server to recover before stale-key grace expires.
 Legacy HTTP sessions are bound to issuer, subject and client ID at initialize.
 Presenting a different principal does not reveal the session and is treated as
 not found. Sessions are not authentication credentials; every request still
-needs a valid bearer token. Current stream-expiry enforcement, scope-based
-authorization and OAuth client storage are tracked in [6_PROGRESS.md](6_PROGRESS.md)
-and must be completed before claiming full Phase 6 coverage.
+needs a valid bearer token. Scope authorization is checked after request
+parsing and before dispatch, and request-state continuation subjects use the
+authenticated issuer and subject.
+
+OAuth client credentials and tokens are separated by issuer; access-token
+entries are keyed by issuer, resource, and client ID. File storage is atomically
+replaced with restrictive permissions and can be AES-256-GCM encrypted using
+an environment-provided key. Do not copy token values into CLI arguments,
+logs, diagnostics, or telemetry. The loopback OAuth callback is one-shot and
+time-limited; it accepts only the callback route and returns a constant page.
+CIMD hosted on loopback is a test-only relaxation and must not be used as a
+production document URL.
+
+The HTTP client does not automatically follow network redirects. Its local
+`http-follow` test launcher follows only the exact loopback OAuth callback.
+Tokens are attached only to the configured MCP origin and are not sent to
+authorization-server endpoints or another origin.
+
+Long-lived HTTP streams are closed at the verified token's expiration.
+Applications and clients must reconnect with a valid token. Multi-instance
+deployments need a coordinated request-state key and must account for each
+process's independent JWKS and introspection caches.
+
+The project has no OS keychain adapter yet. Environment-variable encryption
+keys reduce accidental plaintext storage but do not replace managed key
+provisioning or rotation.
 
 ## File resources
 

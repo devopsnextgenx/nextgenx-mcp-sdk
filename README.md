@@ -125,6 +125,9 @@ limitations.
 
 See [QUICKSTART_HTTP.md](docs/QUICKSTART_HTTP.md) for curl examples, bearer
 authentication, mirrored parameter headers, and client-tool instructions.
+See [AUTH.md](docs/AUTH.md) for OAuth resource-server configuration, scope
+authorization, the client authorization flow, token storage, and deployment
+boundaries.
 See [SECURITY.md](docs/SECURITY.md) for schema and file-sandbox limits,
 form-versus-URL input, request-state key rotation, authenticated subject binding
 and replay limitations.

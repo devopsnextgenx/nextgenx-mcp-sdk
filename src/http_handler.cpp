@@ -174,14 +174,21 @@ std::string oauth_prm_path(std::string_view endpoint_path) {
     return "/.well-known/oauth-protected-resource/" + std::string(endpoint_path);
 }
 
-std::string oauth_prm_url(const HttpRequest& request, std::string_view prm_path) {
+std::string oauth_prm_url(const HttpRequest& request, std::string_view resource,
+                          std::string_view prm_path) {
     std::string_view host;
     for (const auto& [name, value] : request.headers) {
         if (lower_ascii(name) != "host") continue;
         if (!host.empty()) return {};
         host = trim(value);
     }
-    if (host.empty()) return {};
+    if (host.empty()) {
+        const auto scheme = resource.find("://");
+        if (scheme == std::string_view::npos) return {};
+        const auto authority_start = scheme + 3;
+        const auto authority_end = resource.find_first_of("/?#", authority_start);
+        return std::string(resource.substr(0, authority_end)) + std::string(prm_path);
+    }
     return request.scheme + "://" + std::string(host) + std::string(prm_path);
 }
 
@@ -839,7 +846,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         std::string challenge = "Bearer";
         if (oauth_) {
             const auto metadata_url =
-                oauth_prm_url(request, oauth_prm_path(options_.path));
+                oauth_prm_url(request, oauth_->resource, oauth_prm_path(options_.path));
             if (!metadata_url.empty() &&
                 !oauth_->omit_resource_metadata_parameter) {
                 challenge += " resource_metadata=\"" + metadata_url + "\"";

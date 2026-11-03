@@ -38,6 +38,23 @@ bool valid_scope_token(std::string_view scope) noexcept {
     });
 }
 
+ScopeSet parse_scope_set(std::string_view value) {
+    ScopeSet result;
+    while (!value.empty()) {
+        while (!value.empty() && value.front() == ' ') value.remove_prefix(1);
+        if (value.empty()) break;
+        const auto end = value.find(' ');
+        const auto scope = value.substr(0, end);
+        if (!valid_scope_token(scope)) {
+            throw std::invalid_argument("scope values must use RFC 6749 scope-token syntax");
+        }
+        result.emplace(scope);
+        if (end == std::string_view::npos) break;
+        value.remove_prefix(end);
+    }
+    return result;
+}
+
 void validate_scope_set(const ScopeSet& scopes) {
     if (!std::all_of(scopes.begin(), scopes.end(), valid_scope_token)) {
         throw std::invalid_argument("scope values must use RFC 6749 scope-token syntax");

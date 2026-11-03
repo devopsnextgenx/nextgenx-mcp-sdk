@@ -1,5 +1,19 @@
 # HTTP interop evidence
 
+## Phase 6 OAuth interop
+
+Ran `timeout 1800 scripts/verify_6.sh --slice 4 --sanitizers --interop
+</dev/null`. The acceptance gate reported `RESULT: 134 passed, 0 failed, 2
+warnings`. MCP Inspector CLI listed tools successfully when supplied the
+fixture's bearer header. The no-token Inspector run produced output the gate
+did not recognize as its expected `401`/unauthorized text, so that check is a
+warning rather than a passing result.
+
+The gate explicitly reports Claude Code OAuth login as interactive. No manual
+Claude Code OAuth login was performed in this noninteractive run. The earlier
+Claude Code entries in this file are connection-health checks only and do not
+verify Phase 6 OAuth authorization.
+
 ## Phase 4 Host Claude Code Check
 
 Ran the host-installed Claude CLI against the Phase 4 dual-mode HTTP server on

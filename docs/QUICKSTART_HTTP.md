@@ -308,7 +308,7 @@ networks and disable proxy buffering for SSE responses.
 
 ## Authentication hook
 
-The example client accepts a static bearer token on the command line:
+For simple development, the example client accepts a static bearer token:
 
 ```sh
 ./build/cppmcp_http_client --url "$URL" --mode auto --token "$TOKEN"
@@ -320,6 +320,40 @@ Bearer challenge fields and can choose whether the client should retry. Use a
 secret store or short-lived token provider in applications rather than embedding
 tokens in source or shell history. Credential values are not included in client
 logs or authentication error messages.
+
+For OAuth, configure the HTTP server with a canonical public resource URI, an
+authorization-server issuer, and (optionally) supported scopes:
+
+```sh
+./build/cppmcp_http_server --port 8000 \
+  --auth-resource http://127.0.0.1:8000/mcp \
+  --auth-issuer http://127.0.0.1:9000 \
+  --auth-scopes-supported 'mcp:use projects:write'
+```
+
+Loopback HTTP is accepted only for local testing. Use HTTPS URIs for a real
+deployment. The client discovers the server's Protected Resource Metadata from
+the 401 challenge or well-known routes, then uses PKCE and the `resource`
+indicator:
+
+```sh
+./build/cppmcp_http_client --url http://127.0.0.1:8000/mcp \
+  --oauth --oauth-allow-insecure-loopback --oauth-launcher http-follow \
+  --call add --args '{"a":2,"b":3}'
+```
+
+Use `--oauth-launcher print` for a headless authorization-code flow. For
+pre-registration, provide `--oauth-client-id`; put any client secret in a
+protected file and use `--oauth-client-secret-file`. `--oauth-dcr` enables the
+deprecated DCR fallback, and `--oauth-cimd-url` supplies a CIMD URL. The
+`--oauth-store-file` option persists issuer-keyed registrations and tokens;
+protect the file and consider the library's encrypted `FileTokenStore` for
+applications. Never put tokens or client secrets in a URI or logs.
+
+The OAuth provider retries after authentication and performs bounded scope
+step-up after an insufficient-scope challenge. See [AUTH.md](AUTH.md) for
+server builder examples, scope hierarchy, listing modes, storage details, and
+deployment guidance. Stdio does not use this OAuth flow.
 
 ## Prompts, resources, and completion
 
