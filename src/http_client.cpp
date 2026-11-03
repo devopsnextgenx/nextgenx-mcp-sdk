@@ -427,12 +427,16 @@ core::Json modern_meta(const std::string& name, const std::string& version) {
     };
 }
 
-AuthChallenge challenge_for(const std::vector<std::string>& values) {
+AuthChallenge challenge_for(const std::vector<std::string>& values,
+                            std::string operation = {}) {
     auto challenges = parse_www_authenticate(values);
     const auto bearer = std::find_if(challenges.begin(), challenges.end(), [](const auto& item) {
         return lower(item.scheme) == "bearer";
     });
-    return bearer == challenges.end() ? AuthChallenge{} : *bearer;
+    if (bearer == challenges.end()) return {};
+    auto challenge = *bearer;
+    challenge.operation = std::move(operation);
+    return challenge;
 }
 
 }  // namespace
@@ -489,6 +493,61 @@ std::vector<AuthChallenge> parse_www_authenticate(const std::vector<std::string>
         parts.push_back(trim(std::string_view(header).substr(start)));
 
         AuthChallenge* current = nullptr;
+        const auto parse_parameters = [](AuthChallenge& challenge,
+                                         std::string_view input) {
+            std::size_t position = 0;
+            while (position < input.size()) {
+                while (position < input.size() &&
+                       (input[position] == ' ' || input[position] == '\t' ||
+                        input[position] == ',')) {
+                    ++position;
+                }
+                const auto key_start = position;
+                while (position < input.size() &&
+                       input[position] != '=' && input[position] != ' ' &&
+                       input[position] != '\t' && input[position] != ',') {
+                    ++position;
+                }
+                if (position == key_start) break;
+                const auto key = lower(input.substr(key_start, position - key_start));
+                while (position < input.size() &&
+                       (input[position] == ' ' || input[position] == '\t')) {
+                    ++position;
+                }
+                if (position == input.size() || input[position] != '=') break;
+                ++position;
+                while (position < input.size() &&
+                       (input[position] == ' ' || input[position] == '\t')) {
+                    ++position;
+                }
+                std::string value;
+                if (position < input.size() && input[position] == '"') {
+                    ++position;
+                    bool closed = false;
+                    while (position < input.size()) {
+                        const char ch = input[position++];
+                        if (ch == '\\' && position < input.size()) {
+                            value.push_back(input[position++]);
+                        } else if (ch == '"') {
+                            closed = true;
+                            break;
+                        } else {
+                            value.push_back(ch);
+                        }
+                    }
+                    if (!closed) break;
+                } else {
+                    const auto value_start = position;
+                    while (position < input.size() &&
+                           input[position] != ' ' && input[position] != '\t' &&
+                           input[position] != ',') {
+                        ++position;
+                    }
+                    value.assign(input.substr(value_start, position - value_start));
+                }
+                challenge.parameters.insert_or_assign(key, std::move(value));
+            }
+        };
         for (const auto part : parts) {
             if (part.empty()) {
                 continue;
@@ -499,22 +558,7 @@ std::vector<AuthChallenge> parse_www_authenticate(const std::vector<std::string>
                                    (first_space == std::string_view::npos ||
                                     first_equal < first_space);
             if (parameter) {
-                const auto key = lower(trim(part.substr(0, first_equal)));
-                auto raw = trim(part.substr(first_equal + 1));
-                std::string value;
-                if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-                    raw.remove_prefix(1);
-                    raw.remove_suffix(1);
-                    for (std::size_t i = 0; i < raw.size(); ++i) {
-                        if (raw[i] == '\\' && i + 1 < raw.size()) {
-                            ++i;
-                        }
-                        value.push_back(raw[i]);
-                    }
-                } else {
-                    value.assign(raw);
-                }
-                current->parameters[key] = value;
+                parse_parameters(*current, part);
                 continue;
             }
 
@@ -524,26 +568,7 @@ std::vector<AuthChallenge> parse_www_authenticate(const std::vector<std::string>
             result.push_back(std::move(challenge));
             current = &result.back();
             if (space != std::string_view::npos) {
-                const auto rest = trim(part.substr(space));
-                const auto equal = rest.find('=');
-                if (equal != std::string_view::npos) {
-                    const auto key = lower(trim(rest.substr(0, equal)));
-                    auto raw = trim(rest.substr(equal + 1));
-                    std::string value;
-                    if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-                        raw.remove_prefix(1);
-                        raw.remove_suffix(1);
-                        for (std::size_t i = 0; i < raw.size(); ++i) {
-                            if (raw[i] == '\\' && i + 1 < raw.size()) {
-                                ++i;
-                            }
-                            value.push_back(raw[i]);
-                        }
-                    } else {
-                        value.assign(raw);
-                    }
-                    current->parameters[key] = value;
-                }
+                parse_parameters(*current, trim(part.substr(space)));
             }
         }
     }
@@ -691,7 +716,7 @@ struct HttpClientTransport::Impl {
     Response perform(std::string_view body, std::string_view method,
                      std::string_view name = {}, bool initialize = false,
                      bool notification = false, const Headers& mirrored = {},
-                     bool challenged = false,
+                     std::size_t auth_retries = 0,
                      const std::function<void(const core::Message&)>& on_stream = {}) {
         connect_socket();
         transport::Headers headers{
@@ -829,11 +854,14 @@ struct HttpClientTransport::Impl {
                     challenge_headers.push_back(value);
                 }
             }
-            const auto challenge = challenge_for(challenge_headers);
-            if (!challenged && options.auth_provider &&
+            const auto operation = std::string(method) +
+                (name.empty() ? std::string{} : ":" + std::string(name));
+            const auto challenge = challenge_for(challenge_headers, operation);
+            if (auth_retries < 4 && options.auth_provider &&
                 options.auth_provider->on_challenge(challenge) == AuthAction::retry) {
                 close_socket();
-                return perform(body, method, name, initialize, notification, mirrored, true, on_stream);
+                return perform(body, method, name, initialize, notification, mirrored,
+                               auth_retries + 1, on_stream);
             }
             if (response.status == 401) {
                 throw AuthRequired(challenge);
@@ -1040,7 +1068,7 @@ struct ListenHandle::Impl {
     std::int64_t next_request_id = 1;
     std::string last_event_id;
     std::optional<std::chrono::milliseconds> server_retry;
-    bool auth_retry_used = false;
+    std::size_t auth_retries = 0;
 
     void start() {
         worker = std::jthread([this](std::stop_token stop) { run(stop); });
@@ -1342,7 +1370,7 @@ struct ListenHandle::Impl {
         auto mark_connected = [&] {
             const bool reconnected = has_connected;
             has_connected = true;
-            auth_retry_used = false;
+            auth_retries = 0;
             connected_this_attempt = true;
             signal_ready(reconnected);
         };
@@ -1400,11 +1428,10 @@ struct ListenHandle::Impl {
                         challenges.push_back(value);
                     }
                 }
-                const auto challenge = challenge_for(challenges);
-                if (options.auth_provider &&
-                    options.auth_provider->on_challenge(challenge) == AuthAction::retry &&
-                    !auth_retry_used) {
-                    auth_retry_used = true;
+                const auto challenge = challenge_for(challenges, "subscriptions/listen");
+                if (auth_retries < 4 && options.auth_provider &&
+                    options.auth_provider->on_challenge(challenge) == AuthAction::retry) {
+                    ++auth_retries;
                     response.auth_retry_requested = true;
                     throw std::runtime_error("authentication provider requested a retry");
                 }

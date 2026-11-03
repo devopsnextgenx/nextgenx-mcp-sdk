@@ -97,18 +97,20 @@ class SigningKey:
 
 
 class State:
+    DEFAULT_CONFIG = {
+        "cimd": "1", "dcr": "1", "pkce": "1", "iss_param": "good",
+        "iss_advertised": "1", "issuer_doc": "good", "ttl": "3600",
+        "rotate": "1", "grant_limit": "", "state": "good",
+        "introspect_fail": "0",
+    }
+
     def __init__(self, issuer):
         self.issuer = issuer.rstrip("/")
         self.lock = threading.RLock()
         self.temp = tempfile.TemporaryDirectory(prefix="cppmcp-test-as-")
         self.keys = {}
         self.rotate()
-        self.config = {
-            "cimd": "1", "dcr": "1", "pkce": "1", "iss_param": "good",
-            "iss_advertised": "1", "issuer_doc": "good", "ttl": "3600",
-            "rotate": "1", "grant_limit": "", "state": "good",
-            "introspect_fail": "0",
-        }
+        self.config = dict(self.DEFAULT_CONFIG)
         self.codes = {}
         self.refresh = {}
         self.opaque = {}
@@ -160,6 +162,10 @@ class State:
     def token(self, client_id, resource, scope, subject="alice", ttl=None):
         now = int(time.time())
         expires = now + int(ttl if ttl is not None else self.config["ttl"])
+        grant_limit = self.config["grant_limit"].split()
+        if grant_limit:
+            scope = " ".join(
+                item for item in scope.split() if item in set(grant_limit))
         claims = {"iss": self.issuer, "sub": subject, "aud": resource,
                   "scope": scope, "client_id": client_id, "iat": now,
                   "exp": expires, "jti": secrets.token_hex(12)}
@@ -372,6 +378,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/__test/reset":
             with state.lock:
                 state.stats = state.new_stats()
+                state.config = dict(state.DEFAULT_CONFIG)
+                state.codes.clear()
+                state.refresh.clear()
+                state.opaque.clear()
+                state.revoked.clear()
             return json_response(self, 200, {"ok": True})
         if path == "/__test/config":
             with state.lock:

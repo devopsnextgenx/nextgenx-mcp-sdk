@@ -505,6 +505,7 @@ void serve_connection(const std::shared_ptr<Stream>& socket,
     ParseState state;
     state.max_header_bytes = options.max_header_bytes;
     state.max_body_bytes = options.max_body_bytes;
+    state.request.scheme = options.tls ? "https" : "http";
     asio::error_code endpoint_error;
     const auto endpoint = raw_socket->remote_endpoint(endpoint_error);
     if (!endpoint_error) {

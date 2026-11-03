@@ -63,6 +63,7 @@ struct HttpRequest {
     Headers headers;
     std::string body;
     PeerInfo peer;
+    std::string scheme = "http";
 };
 
 class SseStream {

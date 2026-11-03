@@ -12,15 +12,21 @@
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
+#include <exception>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "cppmcp/client.hpp"
+#include "cppmcp/client/oauth_provider.hpp"
 
 #include "../common/client_tour.hpp"
 
@@ -58,16 +64,42 @@ Json parse_object(const char* flag, const char* text) {
     return value;
 }
 
+std::size_t parse_count(std::string_view flag, std::string_view value) {
+    std::size_t count = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), count);
+    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || count == 0) {
+        throw std::invalid_argument(std::string(flag) + " must be a positive integer");
+    }
+    return count;
+}
+
+std::string read_secret_file(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("unable to read OAuth client secret file");
+    std::string secret((std::istreambuf_iterator<char>(input)),
+                       std::istreambuf_iterator<char>());
+    while (!secret.empty() && (secret.back() == '\n' || secret.back() == '\r')) {
+        secret.pop_back();
+    }
+    if (secret.empty()) throw std::runtime_error("OAuth client secret file is empty");
+    return secret;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     try {
         cppmcp::HttpClientOptions options;
         std::string token, log_level, elicit_action, rpc_method, request_method, task_tool;
+        std::string oauth_secret_file, oauth_store_file, oauth_launcher = "xdg-open";
+        std::string oauth_cimd_url, oauth_client_id, oauth_scopes, oauth_grant = "authorization_code";
+        unsigned short oauth_redirect_port = 0;
         std::vector<std::string> subscribe_uris;
         std::optional<std::string> requested_call;
         Json call_args = Json::object(), elicit_content = Json::object(), rpc_params = Json::object();
         bool progress = false, listen = false, demo = false;
+        bool oauth = false, oauth_dcr = false, oauth_allow_insecure_loopback = false;
+        std::size_t repeat = 1, repeat_delay_ms = 0, parallel = 1;
         std::size_t duration_ms = 5000;
         for (int i = 1; i < argc; ++i) {
             const std::string_view argument(argv[i]);
@@ -77,7 +109,13 @@ int main(int argc, char** argv) {
                 argument == "--log-level" || argument == "--elicit" || argument == "--elicit-content" ||
                 argument == "--rpc" || argument == "--rpc-params" || argument == "--request" ||
                 argument == "--params" || argument == "--task" ||
-                argument == "--subscribe" || argument == "--subscribe-resource";
+                argument == "--subscribe" || argument == "--subscribe-resource" ||
+                argument == "--oauth-client-id" || argument == "--oauth-client-secret-file" ||
+                argument == "--oauth-cimd-url" || argument == "--oauth-grant" ||
+                argument == "--oauth-scopes" || argument == "--oauth-launcher" ||
+                argument == "--oauth-redirect-port" || argument == "--oauth-store-file" ||
+                argument == "--repeat" || argument == "--repeat-delay-ms" ||
+                argument == "--parallel";
             if (takes_value && i + 1 >= argc) throw std::invalid_argument("missing value for " + std::string(argument));
             if (argument == "--url") options.url = argv[++i];
             else if (argument == "--mode") options.policy = parse_mode(argv[++i]);
@@ -104,9 +142,65 @@ int main(int argc, char** argv) {
             else if (argument == "--subscribe" || argument == "--subscribe-resource") {
                 subscribe_uris.emplace_back(argv[++i]);
             }
+            else if (argument == "--oauth") oauth = true;
+            else if (argument == "--oauth-client-id") oauth_client_id = argv[++i];
+            else if (argument == "--oauth-client-secret-file") oauth_secret_file = argv[++i];
+            else if (argument == "--oauth-cimd-url") oauth_cimd_url = argv[++i];
+            else if (argument == "--oauth-dcr") oauth_dcr = true;
+            else if (argument == "--oauth-grant") oauth_grant = argv[++i];
+            else if (argument == "--oauth-scopes") oauth_scopes = argv[++i];
+            else if (argument == "--oauth-launcher") oauth_launcher = argv[++i];
+            else if (argument == "--oauth-redirect-port") {
+                const auto port = parse_count("--oauth-redirect-port", argv[++i]);
+                if (port > 65535) throw std::invalid_argument("--oauth-redirect-port is out of range");
+                oauth_redirect_port = static_cast<unsigned short>(port);
+            }
+            else if (argument == "--oauth-store-file") oauth_store_file = argv[++i];
+            else if (argument == "--oauth-allow-insecure-loopback") oauth_allow_insecure_loopback = true;
+            else if (argument == "--repeat") repeat = parse_count("--repeat", argv[++i]);
+            else if (argument == "--repeat-delay-ms") repeat_delay_ms = parse_duration(argv[++i]);
+            else if (argument == "--parallel") parallel = parse_count("--parallel", argv[++i]);
             else throw std::invalid_argument("unknown option: " + std::string(argument));
         }
         if (options.url.empty()) throw std::invalid_argument("--url is required");
+        if (oauth) {
+            if (!token.empty()) throw std::invalid_argument("--oauth and --token cannot be used together");
+            if (oauth_launcher != "http-follow" && oauth_launcher != "print" &&
+                oauth_launcher != "xdg-open" && oauth_launcher != "open" &&
+                oauth_launcher != "start") {
+                throw std::invalid_argument("unsupported --oauth-launcher");
+            }
+            if (oauth_grant != "authorization_code" && oauth_grant != "client_credentials") {
+                throw std::invalid_argument("--oauth-grant must be authorization_code or client_credentials");
+            }
+            cppmcp::client::OAuthProviderOptions oauth_options;
+            oauth_options.resource_url = options.url;
+            oauth_options.client_id = oauth_client_id;
+            oauth_options.client_secret =
+                oauth_secret_file.empty() ? std::string{} : read_secret_file(oauth_secret_file);
+            oauth_options.cimd_url = oauth_cimd_url;
+            oauth_options.grant_type = oauth_grant;
+            oauth_options.launcher = oauth_launcher;
+            oauth_options.redirect_port = oauth_redirect_port;
+            oauth_options.enable_dcr = oauth_dcr;
+            oauth_options.allow_insecure_loopback = oauth_allow_insecure_loopback;
+            oauth_options.requested_scopes.clear();
+            std::istringstream scope_stream(oauth_scopes);
+            for (std::string scope; scope_stream >> scope;) {
+                oauth_options.requested_scopes.insert(std::move(scope));
+            }
+            if (!oauth_store_file.empty()) {
+                oauth_options.token_store =
+                    std::make_shared<cppmcp::client::FileTokenStore>(oauth_store_file);
+            }
+            oauth_options.event_handler = [](std::string_view event) {
+                static std::mutex output_mutex;
+                std::lock_guard lock(output_mutex);
+                std::cout << event << '\n';
+            };
+            options.auth_provider =
+                std::make_shared<cppmcp::client::OAuthProvider>(std::move(oauth_options));
+        }
         if (!token.empty()) options.auth_provider = std::make_shared<cppmcp::StaticBearerProvider>(token);
         if (!elicit_action.empty() || demo) options.client_capabilities["elicitation"] = {{"form", Json::object()}};
 
@@ -160,12 +254,53 @@ int main(int argc, char** argv) {
                     return response;
                 };
             }
-            const auto result = client.call_tool(*requested_call, call_args, std::move(call_options));
-            std::cout << "RESULT " << result.dump() << '\n';
-            if (result.value("resultType", std::string{}) == "input_required" && result.contains("inputRequests") &&
-                result["inputRequests"].is_object()) {
-                for (auto item = result["inputRequests"].begin(); item != result["inputRequests"].end(); ++item) {
-                    std::cout << "ELICIT " << item.value().value("params", Json::object()).value("message", std::string{}) << '\n';
+            const auto execute_call = [&] {
+                const auto result = client.call_tool(*requested_call, call_args, call_options);
+                {
+                    static std::mutex output_mutex;
+                    std::lock_guard lock(output_mutex);
+                    if (result.contains("content") && result["content"].is_array() &&
+                        !result["content"].empty() && result["content"][0].contains("text") &&
+                        result["content"][0]["text"].is_string()) {
+                        std::cout << "CALL " << *requested_call << " -> "
+                                  << result["content"][0]["text"].get<std::string>() << '\n';
+                    }
+                    std::cout << "RESULT " << result.dump() << '\n';
+                }
+                if (result.value("resultType", std::string{}) == "input_required" &&
+                    result.contains("inputRequests") && result["inputRequests"].is_object()) {
+                    for (auto item = result["inputRequests"].begin();
+                         item != result["inputRequests"].end(); ++item) {
+                        std::cout << "ELICIT "
+                                  << item.value().value("params", Json::object())
+                                         .value("message", std::string{}) << '\n';
+                    }
+                }
+            };
+            if (parallel > 1) {
+                std::vector<std::thread> workers;
+                std::vector<std::exception_ptr> errors(parallel);
+                workers.reserve(parallel);
+                for (std::size_t i = 0; i < parallel; ++i) {
+                    workers.emplace_back([&, i] {
+                        try {
+                            execute_call();
+                        } catch (...) {
+                            errors[i] = std::current_exception();
+                        }
+                    });
+                }
+                for (auto& worker : workers) worker.join();
+                for (const auto& error : errors) {
+                    if (error) std::rethrow_exception(error);
+                }
+            } else {
+                for (std::size_t i = 0; i < repeat; ++i) {
+                    if (i != 0 && repeat_delay_ms != 0) {
+                        std::this_thread::sleep_for(
+                            std::chrono::milliseconds(repeat_delay_ms));
+                    }
+                    execute_call();
                 }
             }
         } else if (has_add && !use_ext) {

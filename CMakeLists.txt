@@ -115,6 +115,7 @@ set(CPPMCP_TRANSPORT_HTTP_SOURCES
     src/network_policy.cpp
     src/jwt_verifier.cpp
     src/introspection_verifier.cpp
+    src/oauth_provider.cpp
     src/http_handler.cpp
     src/http_client.cpp
     src/http_server.cpp

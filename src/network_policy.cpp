@@ -194,10 +194,6 @@ HttpResponse exchange(asio::io_context& io, Stream& stream,
         auto value = line.substr(colon + 1);
         const auto first = value.find_first_not_of(" \t");
         value = first == std::string::npos ? std::string{} : value.substr(first);
-        if (name == "location" && !policy.follow_redirects && response.status >= 300 &&
-            response.status < 400) {
-            throw std::runtime_error("network policy forbids redirects");
-        }
         if (name == "transfer-encoding" && lower(value) != "identity") {
             throw std::runtime_error("unsupported HTTP transfer encoding");
         }

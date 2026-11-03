@@ -29,6 +29,7 @@ struct AuthChallenge {
     std::string scope;
     std::string resource_metadata;
     std::string error_description;
+    std::string operation;
 };
 
 enum class AuthAction {

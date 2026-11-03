@@ -204,23 +204,6 @@ std::string parse_request_state_key(const std::string& value) {
     return value;
 }
 
-bool loopback_url(const std::string& value) {
-    const auto scheme = value.find("://");
-    if (scheme == std::string::npos) return false;
-    const auto authority_start = scheme + 3;
-    const auto authority_end = value.find_first_of("/?#", authority_start);
-    auto authority = value.substr(authority_start, authority_end - authority_start);
-    if (!authority.empty() && authority.front() == '[') {
-        const auto close = authority.find(']');
-        if (close == std::string::npos) return false;
-        authority.resize(close + 1);
-        return authority == "[::1]";
-    }
-    const auto colon = authority.find(':');
-    if (colon != std::string::npos) authority.resize(colon);
-    return authority == "localhost" || authority == "127.0.0.1";
-}
-
 bool https_url(const std::string& value) {
     return value.starts_with("https://");
 }
@@ -408,10 +391,9 @@ int main(int argc, char** argv) {
             }
             const auto validate_url = [&](const std::string& url, const char* label) {
                 if (!https_url(url) &&
-                    !(auth_insecure_http_for_testing && url.starts_with("http://") &&
-                      loopback_url(url))) {
+                    !(auth_insecure_http_for_testing && url.starts_with("http://"))) {
                     throw std::invalid_argument(std::string(label) +
-                                                " must use HTTPS except for the explicit loopback testing opt-in");
+                                                " must use HTTPS except for the explicit testing opt-in");
                 }
             };
             validate_url(options.oauth->resource, "--auth-resource");
