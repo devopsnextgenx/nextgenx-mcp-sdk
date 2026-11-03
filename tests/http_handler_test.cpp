@@ -20,6 +20,16 @@ using cppmcp::transport::IHttpExchange;
 using cppmcp::transport::McpHttpHandler;
 using cppmcp::transport::SseStream;
 
+class DenyRateLimiter final : public cppmcp::auth::IRateLimiter {
+public:
+    bool allow(std::string_view peer) const override {
+        observed_peer = std::string(peer);
+        return false;
+    }
+
+    mutable std::string observed_peer;
+};
+
 class MockSseStream final : public SseStream {
 public:
     void write_event(std::string_view data) override { events.emplace_back(data); }
@@ -126,6 +136,7 @@ void test_http_handler() {
     } catch (const std::invalid_argument&) {
         non_ascii_name_rejected = true;
     }
+
     CPPMCP_CHECK(non_ascii_name_rejected);
     McpHttpHandler handler(server);
 
@@ -827,4 +838,29 @@ void test_expiry_guard() {
     auto exchange = std::make_shared<MockExchange>(std::move(request));
     handler.handle(exchange);
     CPPMCP_CHECK(exchange->status == 200);
+}
+
+void test_http_handler_rate_limit() {
+    Server server({"http-rate-limit-test", "HTTP rate-limit test", "1.0"});
+    auto limiter = std::make_shared<DenyRateLimiter>();
+    HttpHandlerOptions options;
+    options.failed_auth_rate_limiter = limiter;
+    cppmcp::transport::OAuthResourceOptions oauth;
+    oauth.resource = "http://127.0.0.1:8000/mcp";
+    oauth.authorization_servers = {"http://127.0.0.1:9000"};
+    options.oauth = std::move(oauth);
+    cppmcp::auth::AuthContext auth_context;
+    auth_context.audience = {"http://127.0.0.1:8000/mcp"};
+    options.token_verifier =
+        std::make_shared<cppmcp::auth::StaticBearerAuthenticator>(
+            "expected-token", std::move(auth_context));
+    McpHttpHandler handler(server, std::move(options));
+    auto request = make_request("tools/list");
+    request.peer.remote_address = "192.0.2.10";
+    request.headers.emplace_back("Host", "192.0.2.10");
+    auto exchange = std::make_shared<MockExchange>(std::move(request));
+    handler.handle(exchange);
+    CPPMCP_CHECK(exchange->status == 429);
+    CPPMCP_CHECK(limiter->observed_peer == "192.0.2.10");
+    CPPMCP_CHECK(response_header(exchange->headers, "WWW-Authenticate") == nullptr);
 }

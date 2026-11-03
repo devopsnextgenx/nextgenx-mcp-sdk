@@ -33,7 +33,8 @@ The focused selection included PRM, JWT/JWKS, introspection, scope, session
 binding, WWW-Authenticate parsing, OAuth discovery/PKCE/issuer/step-up/refresh/
 single-flight/store/SSRF, token passthrough/redaction, and the
 `scope_single_challenge` regression test. CTest discovery initially reported 420 tests. The final gate also added two
-independently selectable MRTR cases, so discovery now reports 422 tests.
+independently selectable MRTR cases and the peer-keyed failed-auth limiter test,
+so discovery now reports 423 tests.
 
 ## Final slice-4 gate
 
@@ -42,7 +43,7 @@ Ran:
 ```text
 timeout 1800 scripts/verify_6.sh --slice 4 --sanitizers --interop </dev/null
 RESULT: 134 passed, 0 failed, 2 warnings
-PASS: ctest discovers 422 tests
+PASS: ctest discovers 423 tests
 PASS: ctest passes
 PASS: sanitizer [address,undefined]: tests pass, zero findings
 PASS: sanitizer [thread]: tests pass, zero findings
@@ -82,7 +83,7 @@ RESULT: 86 passed, 0 failed, 1 warning
 ```
 
 The Phase 5B warning records that the external MCP conformance command was not
-configured. The regression CTest suite passed 422 tests in both gates.
+configured. The regression CTest suite passed 423 tests in both gates.
 
 ## Interactive interop not performed
 

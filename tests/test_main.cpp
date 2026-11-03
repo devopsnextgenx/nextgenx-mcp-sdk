@@ -37,6 +37,7 @@ void test_phase2_memory_roundtrip();
 void test_phase2_stdio_roundtrip();
 void test_client_api(std::string_view selected);
 void test_http_handler();
+void test_http_handler_rate_limit();
 void test_prm_metadata_and_token_verifier();
 void test_scope_hierarchy();
 void test_scope_single_challenge();
@@ -193,6 +194,7 @@ int main(int argc, char** argv) {
     run_selected("client_cache", [&] { test_client_api("client_cache"); });
     run_selected("client_resubscribe", [&] { test_client_api("client_resubscribe"); });
     run_selected("http_handler", test_http_handler);
+    run_selected("http_handler_rate_limit", test_http_handler_rate_limit);
     run_selected("prm_handler_auth", test_prm_metadata_and_token_verifier);
     run_selected("scope_hierarchy", test_scope_hierarchy);
     run_selected("scope_single_challenge", test_scope_single_challenge);

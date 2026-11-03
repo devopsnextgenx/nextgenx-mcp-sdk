@@ -35,6 +35,12 @@ public:
                                std::string_view resource) const = 0;
 };
 
+class IRateLimiter {
+public:
+    virtual ~IRateLimiter() = default;
+    [[nodiscard]] virtual bool allow(std::string_view peer) const = 0;
+};
+
 struct ExchangedToken {
     std::string access_token;
     std::string token_type = "Bearer";

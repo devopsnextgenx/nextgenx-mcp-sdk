@@ -859,6 +859,14 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         else if (invalid_token) challenge += " error=\"invalid_token\"";
         exchange->respond(status, {{"WWW-Authenticate", std::move(challenge)}}, "");
     };
+    const auto reject_authentication = [&](int status, bool invalid_token) {
+        if (options_.failed_auth_rate_limiter &&
+            !options_.failed_auth_rate_limiter->allow(request.peer.remote_address)) {
+            exchange->respond(429, {}, "");
+            return;
+        }
+        send_auth_challenge(status, invalid_token);
+    };
     if (authentication_enabled && authorization_values.size() > 1) {
         exchange->respond(400, {}, "");
         return;
@@ -897,7 +905,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                     decoded_key.push_back(key[i] == '+' ? ' ' : key[i]);
                 }
                 if (lower_ascii(decoded_key) == "access_token") {
-                    send_auth_challenge(401, false);
+                    reject_authentication(401, false);
                     return false;
                 }
                 if (separator == std::string_view::npos) break;
@@ -921,7 +929,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
         }
         if (options_.token_verifier) {
             if (!bearer_scheme || bearer_token.empty()) {
-                send_auth_challenge(401, false);
+                reject_authentication(401, false);
                 return false;
             }
             if (!oauth_) {
@@ -937,7 +945,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
                     throw auth::TokenVerificationError("invalid scope claim");
                 }
             } catch (const auth::TokenVerificationError&) {
-                send_auth_challenge(401, true);
+                reject_authentication(401, true);
                 return false;
             } catch (const std::exception&) {
                 send_auth_challenge(503, false);
@@ -945,7 +953,7 @@ void McpHttpHandler::handle(const std::shared_ptr<IHttpExchange>& exchange) cons
             }
         } else if (options_.authenticator) {
             if (!options_.authenticator(request)) {
-                send_auth_challenge(401, bearer_scheme && !bearer_token.empty());
+                reject_authentication(401, bearer_scheme && !bearer_token.empty());
                 return false;
             }
         } else {

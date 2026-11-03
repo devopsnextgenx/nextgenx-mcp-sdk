@@ -108,7 +108,9 @@ Presenting a different principal does not reveal the session and is treated as
 not found. Sessions are not authentication credentials; every request still
 needs a valid bearer token. Scope authorization is checked after request
 parsing and before dispatch, and request-state continuation subjects use the
-authenticated issuer and subject.
+authenticated issuer and subject. An optional `IRateLimiter` hook receives the
+peer key for failed authentication attempts and can reject them with HTTP 429;
+applications provide the limiter and its shared/distributed state.
 
 OAuth client credentials and tokens are separated by issuer; access-token
 entries are keyed by issuer, resource, and client ID. File storage is atomically

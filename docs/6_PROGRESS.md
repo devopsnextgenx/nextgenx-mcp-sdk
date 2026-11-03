@@ -19,13 +19,14 @@ commits.
   client_credentials, RFC 9207 validation, issuer/resource/client-keyed token
   storage, refresh rotation, single-flight, step-up, CLI flow events, repeat
   and parallel calls.
-- Slice 4: shared bounded metadata/scope parsing, 15 fuzz targets, 422 CTest
+- Slice 4: shared bounded metadata/scope parsing, peer-keyed failed-auth
+  limiter hook, 15 fuzz targets, 423 CTest
   cases, OAuth and security guides, spec notes, evidence, and interop records.
 
 The Phase 5B commit at `2078252` was present at start. The implementation
 commits through slice 3 are `89a1ae3`, `199642b`, `470ac8e`, and `56dd37e`.
 The original CTest baseline was 342; current CTest discovery and execution
-report 422 tests.
+report 423 tests.
 
 ## Final verification
 

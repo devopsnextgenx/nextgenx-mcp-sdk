@@ -39,6 +39,11 @@ the inbound token through `AuthContext`. Invalid credentials receive a 401
 `invalid_token` challenge; a valid identity lacking permissions receives one
 403 challenge containing all missing scopes.
 
+Applications can inject `auth::IRateLimiter` through the HTTP handler options.
+It receives the peer address for failed authentication attempts; a denied
+attempt receives HTTP 429. The SDK supplies the hook, not a particular
+distributed limiter or peer-identity policy.
+
 ## Scope design
 
 Every request requires `mcp:use` by default. Per-operation requirements can be

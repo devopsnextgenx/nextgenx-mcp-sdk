@@ -500,6 +500,7 @@ if(CPPMCP_BUILD_TESTS)
             dual_mode_runtime dual_mode_server_compat ttl_cache_scope ttl_server_window
             ttl_probe ttl_freshness expiry_reconnect expiry_cleanup expiry_session_timer
             expiry_legacy_timeout expiry_lifecycle expiry_guard sse_parser www_auth listen
+            http_handler_rate_limit
             client_mrtr_prompt client_mrtr_resource
             sse_parser_cr_endings sse_parser_field_semantics sse_parser_id_persistence
             sse_parser_retry_digits sse_parser_truncated_dispatch sse_parser_size_limit

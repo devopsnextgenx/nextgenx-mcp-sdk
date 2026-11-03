@@ -122,6 +122,7 @@ struct HttpHandlerOptions {
     std::function<bool(const HttpRequest&)> authenticator;
     std::function<std::string(const HttpRequest&)> request_state_subject;
     std::shared_ptr<const auth::ITokenVerifier> token_verifier;
+    std::shared_ptr<const auth::IRateLimiter> failed_auth_rate_limiter;
     std::optional<OAuthResourceOptions> oauth;
 };
 
